@@ -1,0 +1,41 @@
+# Free-tier caps config — the seed of the M2 quota ledger (design doc, component 2).
+# RULE: every cap row carries as_of (date it was last verified against the provider's
+# published limits). Live 429/402 responses override these values at runtime.
+# These are PLACEHOLDERS: verify each before M2 coding starts (the burn table).
+as_of: 2026-07-30
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    key_ref: keyring:sonara/groq        # dev fallback: .env GROQ_API_KEY
+    tier: fast-free
+    pinned_model: llama-3.3-70b-versatile  # re-verify tool-call support at M2
+    caps: verify-at-m2                      # per-model RPM/RPD from console.groq.com/docs
+  google_ai_studio:
+    base_url: https://generativelanguage.googleapis.com
+    key_ref: keyring:sonara/google
+    tier: deep-free
+    pinned_model: gemini-flash-free        # re-verify exact free model id at M2
+    caps: verify-at-m2
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    key_ref: keyring:sonara/openrouter
+    tier: deep-free
+    pinned_model: free-70b-llama-variant   # pick exact :free model with tool support at M2
+    caps: verify-at-m2                      # ~50 req/day without credit purchase, verify
+  mistral:
+    base_url: https://api.mistral.ai/v1
+    key_ref: keyring:sonara/mistral
+    tier: deep-free
+    pinned_model: mistral-small-latest
+    caps: verify-at-m2
+  nvidia_nim:
+    base_url: https://integrate.api.nvidia.com/v1
+    key_ref: keyring:sonara/nvidia
+    tier: deep-free-burst                   # one-time trial credits, reserve for bursts
+    pinned_model: nemotron                  # pick exact model at M2
+    caps: { window: total, limit: verify-at-m2 }  # 1000-5000 one-time credits
+  ollama_local:
+    base_url: http://localhost:11434/v1
+    tier: local
+    pinned_model: qwen3-4b-instruct-q4     # install Ollama at M2
+    caps: none

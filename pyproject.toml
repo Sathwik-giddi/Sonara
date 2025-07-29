@@ -1,0 +1,19 @@
+[project]
+name = "sonara"
+version = "0.0.1"
+description = "Sonara: Windows-first, router-first personal voice assistant at $0. Wake word: Hey Sonara"
+readme = "README.md"
+# 3.12 pin: faster-whisper/ctranslate2 and onnxruntime wheels lag the newest CPython
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "faster-whisper>=1.0",
+    "kokoro-onnx>=0.4",
+    "openai>=1.40",
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+]
+
+[tool.uv]
+python-preference = "managed"
