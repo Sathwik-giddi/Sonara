@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.table import Table
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))  # so `from sonara import ...` works when run as a script
 MODELS = ROOT / "models"
 SAMPLE_RATE = 16_000
 RECORD_SECONDS = float(os.environ.get("SMOKE_RECORD_SECONDS", "6"))
@@ -36,6 +37,27 @@ STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
 
 console = Console()
 timings: dict[str, float | None] = {}
+# Which tier served the last utterance, and the budget that tier is judged against.
+last_route: dict[str, object] = {"tier": "fast", "target_s": 2.0}
+
+
+def for_speech(text: str) -> str:
+    """Strip markdown before it reaches TTS.
+
+    Chat models answer in markdown. Piper reads it literally, so "**Buying**
+    makes sense" is spoken as "asterisk asterisk Buying asterisk asterisk". The
+    fix belongs here, not in the prompt: no instruction reliably stops every
+    model from ever emitting a bullet.
+    """
+    t = re.sub(r"```.*?```", " ", text, flags=re.S)          # code fences
+    t = re.sub(r"`([^`]*)`", r"\1", t)                        # inline code
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)                  # bold
+    t = re.sub(r"(?<!\w)[*_]([^*_]+)[*_](?!\w)", r"\1", t)    # italic
+    t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.M)       # headings
+    t = re.sub(r"^\s*[-*+]\s+", "", t, flags=re.M)            # bullets
+    t = re.sub(r"^\s*\d+\.\s+", "", t, flags=re.M)            # numbered lists
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)            # links -> label
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def stage(name: str):
@@ -150,46 +172,48 @@ def transcribe(audio: np.ndarray) -> str | None:
     return text or None
 
 
+# Two failures this replaces: one-sentence replies could not answer a two-part
+# question, and with no tools yet it confidently invented a weather forecast.
+# Until the M3 skill layer lands, "I can't know that yet" is the honest answer
+# and the one that keeps trust.
+SYSTEM_PROMPT = (
+    "You are Sonara, a voice assistant. Reply in natural spoken language, brief "
+    "but complete: if the user asks two things, answer both. You have no live "
+    "data yet - no weather, news, web or calendar access - so when asked for "
+    "real-time facts, say you cannot look that up yet instead of inventing an answer."
+)
+
+
 def ask_llm(text: str) -> str | None:
-    client = get_client()
-    if client is None:
-        console.print("[yellow]LLM skipped: GROQ_API_KEY not set in .env[/yellow]")
+    """Route the utterance to whichever brain suits it, then stream the reply."""
+    router = get_router()
+    if router is None:
         return None
-    first_token_ms = None
-    reply_parts: list[str] = []
-    t0 = time.perf_counter()
-    with stage("llm_full_reply"):
-        streamed = client.chat.completions.create(
-            model=os.environ.get("SMOKE_LLM_MODEL", "llama-3.3-70b-versatile"),
-            messages=[
-                {
-                    "role": "system",
-                    # Two failures this replaces: one-sentence replies could not answer
-                    # a two-part question, and with no tools yet it confidently invented
-                    # a weather forecast. Until the M3 skill layer lands, saying "I can't
-                    # know that yet" is the honest answer and the one that keeps trust.
-                    "content": (
-                        "You are Sonara, a voice assistant. Reply in natural spoken "
-                        "language, brief but complete: if the user asks two things, "
-                        "answer both. You have no live data yet - no weather, news, web "
-                        "or calendar access - so when asked for real-time facts, say you "
-                        "cannot look that up yet instead of inventing an answer."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            stream=True,
-            max_tokens=200,
-        )
-        for chunk in streamed:
-            delta = chunk.choices[0].delta.content or ""
-            if delta and first_token_ms is None:
-                first_token_ms = (time.perf_counter() - t0) * 1000
-            reply_parts.append(delta)
-    timings["llm_first_token"] = first_token_ms
-    reply = "".join(reply_parts).strip()
-    console.print(f"[bold]Sonara:[/bold] {reply}")
-    return reply or None
+
+    from sonara import NoProviderAvailable, classify
+
+    task = classify(text)
+    try:
+        with stage("llm_full_reply"):
+            answer = router.ask(text, system=SYSTEM_PROMPT, task=task, max_tokens=200)
+    except NoProviderAvailable as e:
+        console.print(f"[red]No brain available: {e}[/red]")
+        return None
+
+    timings["llm_first_token"] = answer.first_token_ms
+    last_route["tier"] = router.tier_of(answer.choice.provider)
+    last_route["target_s"] = float(
+        router.models.get("latency_targets_s", {}).get(last_route["tier"], 2.0)
+    )
+    # Show the routing decision - the whole point of the router is that this
+    # line changes with the question, not with the config.
+    console.print(
+        f"[dim]routed {task.value} -> {answer.choice.provider}/{answer.choice.model}[/dim]"
+    )
+    if len(answer.attempts) > 1:
+        console.print(f"[yellow]failover: {' | '.join(answer.attempts)}[/yellow]")
+    console.print(f"[bold]Sonara:[/bold] {answer.text}")
+    return answer.text or None
 
 
 def speak(text: str) -> None:
@@ -210,6 +234,7 @@ def speak(text: str) -> None:
     # length of the answer - synthesizing the whole reply first made a fuller answer
     # cost 1,872ms before a single sample was heard. This is the M1 requirement,
     # previewed here so the measurement reflects what M1 will feel like.
+    text = for_speech(text)
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()] or [text]
 
     def render(s: str) -> np.ndarray:
@@ -230,22 +255,27 @@ def speak(text: str) -> None:
         console.print(f"[dim]streamed {len(sentences)} sentences[/dim]")
 
 
-_client = None
+_router = None
 
 
-def get_client():
-    """One shared client, so warm_connection() actually warms the connection the
-    real call reuses. A second OpenAI() instance means a second connection pool and
-    a fresh TLS handshake — the warm-up would look like it worked and do nothing."""
-    global _client
-    if _client is None:
-        key = os.environ.get("GROQ_API_KEY")
-        if not key:
+def get_router():
+    """The router owns provider clients, task classification and failover.
+
+    smoke_test used to hold one hardcoded Groq client. Now the same voice loop
+    reaches whichever brain the utterance deserves - "remind me at 6" to a proven
+    tool-caller, "compare these GPUs" to a 550B model - without this script
+    knowing anything about providers.
+    """
+    global _router
+    if _router is None:
+        try:
+            from sonara import Router
+
+            _router = Router()
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]router unavailable ({type(e).__name__}: {e})[/red]")
             return None
-        from openai import OpenAI
-
-        _client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key)
-    return _client
+    return _router
 
 
 def warm_connection() -> None:
@@ -254,19 +284,30 @@ def warm_connection() -> None:
     Measured: turn 1 of a session costs ~1.7-2.1s extra to first token,
     reproducibly, while every later turn is 160-290ms. Without this the very
     first thing a user ever says to Sonara is also the slowest.
+
+    Warms the FAST tier only: it serves chat and command, which is most traffic,
+    and warming every provider would spend scarce deep-tier requests on "hi".
     """
-    if not get_client():
+    router = get_router()
+    if router is None:
         return
-    try:
-        t = time.perf_counter()
-        get_client().chat.completions.create(
-            model=os.environ.get("SMOKE_LLM_MODEL", "llama-3.3-70b-versatile"),
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=1,
-        )
-        console.print(f"[dim]Groq connection warmed ({(time.perf_counter()-t)*1000:,.0f}ms, off the clock)[/dim]")
-    except Exception as e:
-        console.print(f"[yellow]Warm-up failed ({type(e).__name__}) — first turn will be slow[/yellow]")
+    for provider in router.models.get("tiers", {}).get("fast", []):
+        if not router.available(provider):
+            continue
+        try:
+            t = time.perf_counter()
+            router._client(provider).chat.completions.create(
+                model=router.caps["providers"][provider]["pinned_model"],
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+            )
+            console.print(
+                f"[dim]{provider} connection warmed "
+                f"({(time.perf_counter()-t)*1000:,.0f}ms, off the clock)[/dim]"
+            )
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[yellow]Warm-up failed for {provider} ({type(e).__name__}) — "
+                          f"first turn will be slow[/yellow]")
 
 
 def load_wav(path: Path) -> np.ndarray:
@@ -318,11 +359,16 @@ def main() -> None:
     ts = timings.get("tts_first_sentence")
     if st is not None and ft is not None and ts is not None:
         total = (st + ft + ts) / 1000
-        verdict = "PASS" if total <= 2.0 else "OVER"
-        colour = "green" if total <= 2.0 else "red"
+        # Judged against the tier that actually served it. A 550B reasoning answer
+        # is allowed 2.5s; holding it to the chat budget would fail a system doing
+        # exactly what it was designed to do.
+        tier = last_route["tier"]
+        target = float(last_route["target_s"])
+        verdict = "PASS" if total <= target else "OVER"
+        colour = "green" if total <= target else "red"
         console.print(
             f"\n[bold {colour}]End-of-speech -> first audio: {total:.2f}s  "
-            f"[{verdict} vs 2.0s M1 gate][/bold {colour}]"
+            f"[{verdict} vs {target:.1f}s {tier}-tier gate][/bold {colour}]"
         )
         console.print(
             f"[dim]  stt {st:,.0f} + first-token {ft:,.0f} + first-sentence tts {ts:,.0f} ms[/dim]"

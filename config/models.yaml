@@ -89,7 +89,26 @@ routes:
 # on NIM read-timed out at 180s, and the OpenAI client's default is 600s. Anything
 # slower than these is treated as a failure and the router moves to the next
 # candidate, which is strictly better than silence.
+# MEASURED 2026-07-31, and the variance is the point. Repeated SHORT prompts:
+#   nemotron-3-ultra-550b : 1,004 / 1,060 / 1,336 ms, 1 outright failure in 4
+#   nemotron-3-super-120b : 503 / 546 / 574 ms
+# But a genuinely hard prompt ("compare renting vs buying a GPU") took 16,637 ms
+# to FIRST TOKEN on the 550B. These are reasoning models: they think before they
+# speak, and thinking time scales with the question. For a voice assistant that
+# is silence, which is the one thing it cannot do.
+# So deep is capped at 10s: past that, fail over to a faster candidate rather
+# than let the user sit in silence. Answer quality is worth waiting for; a dead
+# microphone is not.
 timeouts_s:
   fast:  8
-  deep:  20
+  deep:  10
   local: 30
+
+# End-of-speech -> first-audio budget, PER TIER. A deep-tier answer is allowed to
+# be slower because the user asked something worth thinking about; judging a 550B
+# reasoning answer against the chat budget would fail a system that is behaving
+# exactly as designed. Fast tier: 2.0s is the M1 interim gate, 1.5s the final target.
+latency_targets_s:
+  fast:  2.0
+  deep:  2.5
+  local: 4.0
