@@ -8,6 +8,9 @@ models/
 logs/
 .uv/
 .last_recording.wav
+
+# Voice corpus: recordings of the owner's voice. Personal data, never publishes.
+recordings/
 .obsidian/
 
 # Sonara local tooling: your personal hooks — never commit these onto teammates

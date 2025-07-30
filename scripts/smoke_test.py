@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,7 @@ MODELS = ROOT / "models"
 SAMPLE_RATE = 16_000
 RECORD_SECONDS = float(os.environ.get("SMOKE_RECORD_SECONDS", "6"))
 LAST_TAKE = ROOT / ".last_recording.wav"
+CORPUS = ROOT / "recordings"
 STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "distil-small.en")
 STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
 
@@ -63,13 +65,23 @@ def record_utterance() -> np.ndarray:
     console.print("[dim]Recording done. The latency clock starts NOW.[/dim]")
     mono = audio[:, 0]
 
-    # Keep the take. Lets STT settings be A/B'd against a real voice without
-    # re-recording, and makes a mishearing reproducible instead of anecdotal.
-    with wave.open(str(LAST_TAKE), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes((np.clip(mono, -1, 1) * 32767).astype(np.int16).tobytes())
+    # Keep every take. Two purposes: A/B STT settings against a real voice without
+    # re-recording, and accumulate the corpus the M1 gate needs (50 real exchanges)
+    # so any future config change can be re-scored against all of it at once.
+    pcm16 = (np.clip(mono, -1, 1) * 32767).astype(np.int16).tobytes()
+
+    def _write(path: Path) -> None:
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(pcm16)
+
+    _write(LAST_TAKE)
+    CORPUS.mkdir(exist_ok=True)
+    archived = CORPUS / f"{datetime.now():%Y%m%d-%H%M%S}.wav"
+    _write(archived)
+    console.print(f"[dim]saved {archived.relative_to(ROOT)}[/dim]")
 
     peak = float(np.abs(mono).max())
     if peak < 0.05:
@@ -223,6 +235,7 @@ def main() -> None:
             return
         console.print(f"[dim]Replaying {p.name} (no mic, latency not comparable)[/dim]")
         audio = load_wav(p)
+        warm_connection()  # replay must warm too, or it reports a false OVER
     else:
         warm_connection()
         audio = record_utterance()
