@@ -15,5 +15,13 @@ dependencies = [
     "piper-tts>=1.6.0",
 ]
 
+[project.optional-dependencies]
+# Windows + NVIDIA only. ctranslate2 (faster-whisper's backend) links cuBLAS and
+# cuDNN at runtime; without these, STT silently falls back to CPU, which measured
+# 1.5s cold and degraded past 7s under sustained load. Install with:
+#   uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+# scripts/cuda_dlls.py registers them (site-packages is not on Windows' DLL path).
+cuda = ["nvidia-cublas-cu12>=12.9", "nvidia-cudnn-cu12>=9.24"]
+
 [tool.uv]
 python-preference = "managed"
