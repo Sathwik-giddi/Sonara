@@ -61,18 +61,30 @@ def record_utterance() -> np.ndarray:
 
 def transcribe(audio: np.ndarray) -> str | None:
     try:
+        import cuda_dlls  # must run before faster_whisper imports ctranslate2
+
+        cuda_dlls.enable()
         from faster_whisper import WhisperModel
     except Exception as e:
         console.print(f"[red]STT skipped: faster-whisper not importable ({e})[/red]")
         return None
 
+    # ctranslate2 fails LAZILY: the constructor succeeds without the CUDA DLLs and
+    # only dies on the first encode. So warm up inside the try, or the fallback
+    # never fires and the crash lands mid-conversation instead.
+    warm = np.zeros(SAMPLE_RATE, dtype=np.float32)
     with stage("stt_model_load (excluded from budget)"):
         try:
             model = WhisperModel("distil-small.en", device="cuda", compute_type="int8")
+            list(model.transcribe(warm, language="en", beam_size=1)[0])
             console.print("[dim]STT on CUDA[/dim]")
-        except Exception:
+        except Exception as e:
+            console.print(
+                f"[yellow]CUDA unavailable ({type(e).__name__}: "
+                f"{str(e).splitlines()[0][:70]}) — STT on CPU[/yellow]"
+            )
             model = WhisperModel("distil-small.en", device="cpu", compute_type="int8")
-            console.print("[yellow]STT fell back to CPU (CUDA unavailable)[/yellow]")
+            list(model.transcribe(warm, language="en", beam_size=1)[0])
 
     with stage("stt_transcribe"):
         segments, _ = model.transcribe(audio, language="en", beam_size=1)
