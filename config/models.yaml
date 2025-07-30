@@ -1,0 +1,64 @@
+# Task-aware model routing. Companion to caps.yaml (which holds quota limits).
+#
+# HOW ROUTING WORKS
+#   1. sonara/tasks.py classifies the utterance deterministically (no LLM call).
+#   2. For that task, walk `routes` in order and take the first candidate whose
+#      provider has a key, has headroom in the ledger, and is not marked
+#      exhausted by a live 429.
+#   3. Every task ends with a local candidate, so Sonara degrades instead of dying.
+#
+# MODEL IDS: NVIDIA NIM ids are org/model-name and the catalog moves. Anything
+# marked `verify: true` has NOT been confirmed against the live catalog on this
+# account - run `uv run scripts/probe_models.py` to list what the key can
+# actually reach and to tool-call-test the candidates.
+as_of: 2026-07-31
+
+# Preference order when several candidates are equally eligible.
+# Rationale: Groq wins on tokens/sec (measured 281-289ms to first token), which
+# is what the latency contract cares about. NIM's credits are a ONE-TIME trial,
+# so it is a reserve for work that genuinely needs a bigger brain, never the
+# default. Local is the floor that keeps Sonara alive at $0 when all else dries up.
+tiers:
+  fast:   [groq]
+  deep:   [nvidia_nim, google_ai_studio, openrouter, mistral]
+  local:  [ollama_local]
+
+routes:
+  # Quick conversation. Speed is the product here; a smarter model that answers
+  # 400ms later is a worse answer.
+  chat:
+    - {provider: groq,        model: llama-3.3-70b-versatile}
+    - {provider: nvidia_nim,  model: meta/llama-3.3-70b-instruct, verify: true}
+    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+
+  # Tool/function calling: PC control, reminders, media. Correctness of the tool
+  # call matters more than eloquence - a malformed call is a failed action, and
+  # small models are measurably unreliable here (design doc, fallback ladder).
+  # Nemotron is on the NIM tier specifically for its OpenAI-format tool calling.
+  command:
+    - {provider: groq,        model: llama-3.3-70b-versatile}
+    - {provider: nvidia_nim,  model: nvidia/llama-3.3-nemotron-super-49b-v1, verify: true}
+    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+
+  # Planning, comparison, multi-step analysis. This is the case that justifies
+  # the deep tier existing at all: route here even when the fast tier has
+  # headroom, because the answer quality difference is the whole point.
+  reason:
+    - {provider: nvidia_nim,  model: deepseek-ai/deepseek-r1, verify: true}
+    - {provider: nvidia_nim,  model: nvidia/llama-3.3-nemotron-super-49b-v1, verify: true}
+    - {provider: groq,        model: llama-3.3-70b-versatile}
+    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+
+  # Code: writing, explaining, debugging.
+  code:
+    - {provider: nvidia_nim,  model: qwen/qwen2.5-coder-32b-instruct, verify: true}
+    - {provider: nvidia_nim,  model: deepseek-ai/deepseek-r1, verify: true}
+    - {provider: groq,        model: llama-3.3-70b-versatile}
+    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+
+  # Long input, short output. Needs context window, not brilliance - so prefer
+  # the fast tier and save deep-tier requests for work that needs thinking.
+  summarize:
+    - {provider: groq,        model: llama-3.3-70b-versatile}
+    - {provider: nvidia_nim,  model: meta/llama-3.3-70b-instruct, verify: true}
+    - {provider: ollama_local, model: qwen3-4b-instruct-q4}

@@ -13,6 +13,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "rich>=13.7",
     "piper-tts>=1.6.0",
+    "pyyaml>=6.0.3",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
