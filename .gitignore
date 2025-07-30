@@ -7,6 +7,7 @@ models/
 *.bin
 logs/
 .uv/
+.last_recording.wav
 .obsidian/
 
 # Sonara local tooling: your personal hooks — never commit these onto teammates

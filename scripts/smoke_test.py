@@ -9,9 +9,11 @@ Requires GROQ_API_KEY in .env for the LLM stage (others skip gracefully).
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
 SAMPLE_RATE = 16_000
 RECORD_SECONDS = float(os.environ.get("SMOKE_RECORD_SECONDS", "6"))
+LAST_TAKE = ROOT / ".last_recording.wav"
+STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "distil-small.en")
+STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
 
 console = Console()
 timings: dict[str, float | None] = {}
@@ -56,7 +61,20 @@ def record_utterance() -> np.ndarray:
     )
     sd.wait()
     console.print("[dim]Recording done. The latency clock starts NOW.[/dim]")
-    return audio[:, 0]
+    mono = audio[:, 0]
+
+    # Keep the take. Lets STT settings be A/B'd against a real voice without
+    # re-recording, and makes a mishearing reproducible instead of anecdotal.
+    with wave.open(str(LAST_TAKE), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes((np.clip(mono, -1, 1) * 32767).astype(np.int16).tobytes())
+
+    peak = float(np.abs(mono).max())
+    if peak < 0.05:
+        console.print(f"[yellow]Mic level very low (peak {peak:.3f}) — check input gain[/yellow]")
+    return mono
 
 
 def transcribe(audio: np.ndarray) -> str | None:
@@ -75,19 +93,32 @@ def transcribe(audio: np.ndarray) -> str | None:
     warm = np.zeros(SAMPLE_RATE, dtype=np.float32)
     with stage("stt_model_load (excluded from budget)"):
         try:
-            model = WhisperModel("distil-small.en", device="cuda", compute_type="int8")
+            model = WhisperModel(STT_MODEL, device="cuda", compute_type="int8")
             list(model.transcribe(warm, language="en", beam_size=1)[0])
-            console.print("[dim]STT on CUDA[/dim]")
+            console.print(f"[dim]STT {STT_MODEL} on CUDA (beam {STT_BEAM})[/dim]")
         except Exception as e:
             console.print(
                 f"[yellow]CUDA unavailable ({type(e).__name__}: "
                 f"{str(e).splitlines()[0][:70]}) — STT on CPU[/yellow]"
             )
-            model = WhisperModel("distil-small.en", device="cpu", compute_type="int8")
+            model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8")
             list(model.transcribe(warm, language="en", beam_size=1)[0])
 
     with stage("stt_transcribe"):
-        segments, _ = model.transcribe(audio, language="en", beam_size=1)
+        # vad_filter drops the silence around the utterance; a fixed 6s buffer is
+        # mostly silence and Whisper is known to degrade on that. NOTE: this is
+        # principled, not yet validated as the fix for the real mishearing
+        # ("what's the weather today" -> "A worst weather today"). A 4-way sweep
+        # (beam 1/5 x vad on/off) on synthetic speech showed no difference at all,
+        # so config is probably not the lever - model size and acoustics are.
+        # Settle it against a real take: smoke_test.py --replay
+        segments, _ = model.transcribe(
+            audio,
+            language="en",
+            beam_size=STT_BEAM,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
         text = " ".join(s.text.strip() for s in segments).strip()
     console.print(f"[bold]Heard:[/bold] {text!r}")
     return text or None
@@ -144,10 +175,58 @@ def speak(text: str) -> None:
     sd.wait()
 
 
+def warm_connection() -> None:
+    """Pay the DNS + TLS + HTTP/2 setup cost before the user speaks.
+
+    Measured: turn 1 of a session costs ~1.7-2.1s extra to first token,
+    reproducibly, while every later turn is 160-290ms. Without this the very
+    first thing a user ever says to Sonara is also the slowest.
+    """
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        return
+    from openai import OpenAI
+
+    try:
+        t = time.perf_counter()
+        OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key).chat.completions.create(
+            model=os.environ.get("SMOKE_LLM_MODEL", "llama-3.3-70b-versatile"),
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
+        console.print(f"[dim]Groq connection warmed ({(time.perf_counter()-t)*1000:,.0f}ms, off the clock)[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]Warm-up failed ({type(e).__name__}) — first turn will be slow[/yellow]")
+
+
+def load_wav(path: Path) -> np.ndarray:
+    with wave.open(str(path), "rb") as w:
+        pcm = w.readframes(w.getnframes())
+    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--from-file", metavar="WAV", default=None,
+                    help=f"re-run on a saved take instead of the mic (default {LAST_TAKE.name})")
+    ap.add_argument("--replay", action="store_true", help=f"shorthand for --from-file {LAST_TAKE.name}")
+    args = ap.parse_args()
+
     # override=True: .env wins over any stale OS-level key (see bench_pipeline.py)
     load_dotenv(ROOT / ".env", override=True)
-    audio = record_utterance()
+
+    src = args.from_file or (str(LAST_TAKE) if args.replay else None)
+    if src:
+        p = Path(src)
+        if not p.exists():
+            console.print(f"[red]No such recording: {p}[/red]")
+            return
+        console.print(f"[dim]Replaying {p.name} (no mic, latency not comparable)[/dim]")
+        audio = load_wav(p)
+    else:
+        warm_connection()
+        audio = record_utterance()
+
     text = transcribe(audio)
     reply = ask_llm(text) if text else None
     if reply:
