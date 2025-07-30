@@ -88,6 +88,25 @@ class Router:
     def available(self, provider: str) -> bool:
         return self.key_for(provider) is not None
 
+    def _forbidden(self, model: str) -> bool:
+        """Block proprietary models proxied through a free provider. NIM's catalog
+        includes ~vendor/model-*, ~openai/gpt-*, ~x-ai/grok-* - the likeliest
+        things to burn paid credits, and $0-forever is a hard constraint."""
+        return any(model.startswith(p) for p in self.models.get("forbidden_prefixes", []))
+
+    def tier_of(self, provider: str) -> str:
+        for tier, members in self.models.get("tiers", {}).items():
+            if provider in members:
+                return tier
+        return "deep"
+
+    def timeout_for(self, provider: str) -> float:
+        """A voice assistant must never hang. meta/llama-3.3-70b on NIM read-timed
+        out at 180s and the OpenAI client's default is 600s - either would mean
+        Sonara silently freezing mid-conversation. Past the ceiling we treat it as
+        a failure and move to the next candidate, which is always better than silence."""
+        return float(self.models.get("timeouts_s", {}).get(self.tier_of(provider), 15))
+
     def _client(self, provider: str):
         """One client per provider, reused. A fresh client means a fresh TLS
         handshake, which measured ~1.7s on the first call - the entire latency
@@ -97,7 +116,10 @@ class Router:
 
             base = self.caps["providers"][provider]["base_url"]
             key = self.key_for(provider)
-            self._clients[provider] = OpenAI(base_url=base, api_key=key or "none")
+            self._clients[provider] = OpenAI(
+                base_url=base, api_key=key or "none",
+                timeout=self.timeout_for(provider), max_retries=0,
+            )
         return self._clients[provider]
 
     def _caps_for(self, provider: str) -> dict | None:
@@ -116,6 +138,9 @@ class Router:
 
         for cand in self.candidates(task):
             provider, model = cand["provider"], cand["model"]
+            if self._forbidden(model):
+                skipped.append(f"{model}(forbidden)")
+                continue
             if not self.available(provider):
                 skipped.append(f"{provider}(no key)")
                 continue
