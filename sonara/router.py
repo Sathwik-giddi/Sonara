@@ -194,6 +194,51 @@ class Router:
             f"all candidates failed for task={task.value}: {'; '.join(attempts)}"
         ) from last_error
 
+    def ask_with_tools(self, text: str, tools: list[dict], *, system: str | None = None,
+                       task: Task | None = None, max_tokens: int = 300) -> tuple[list, str, Choice]:
+        """Route, attach tool definitions, and return (tool_calls, text, choice).
+
+        Not streamed: a tool call is only useful once it is complete, so streaming
+        buys nothing here and complicates parsing. The spoken reply that FOLLOWS the
+        tool result is what gets streamed, on the fast tier.
+        """
+        task = task or classify(text)
+        attempts: list[str] = []
+        last_error: Exception | None = None
+
+        for cand in self.candidates(task):
+            provider, model = cand["provider"], cand["model"]
+            if self._forbidden(model) or not self.available(provider):
+                continue
+            if not self.ledger.has_headroom(provider, model, self._caps_for(provider)):
+                continue
+            choice = Choice(provider, model, task,
+                            self.caps["providers"][provider]["base_url"], f"task={task.value}")
+            try:
+                t0 = time.perf_counter()
+                r = self._client(provider).chat.completions.create(
+                    model=model,
+                    messages=([{"role": "system", "content": system}] if system else [])
+                    + [{"role": "user", "content": text}],
+                    tools=tools, max_tokens=max_tokens,
+                )
+                msg = r.choices[0].message
+                self.ledger.record(provider, model, task=task.value, ok=True, status=200,
+                                   latency_ms=(time.perf_counter() - t0) * 1000)
+                return (msg.tool_calls or [], (msg.content or "").strip(), choice)
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                self.ledger.record(provider, model, task=task.value, ok=False, status=status)
+                if status in (429, 402):
+                    self.ledger.mark_exhausted(provider, model, retry_after_s=_retry_after(e),
+                                               reason=f"HTTP {status}")
+                attempts.append(f"{provider}/{model}: {type(e).__name__}")
+
+        raise NoProviderAvailable(
+            f"no provider served tools for task={task.value}: {'; '.join(attempts)}"
+        ) from last_error
+
     def _call(self, choice: Choice, text: str, system: str | None,
               max_tokens: int, stream: bool, attempts: list[str]) -> Answer:
         messages = ([{"role": "system", "content": system}] if system else []) + \

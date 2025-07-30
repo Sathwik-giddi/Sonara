@@ -81,15 +81,21 @@ class Ledger:
         )
         self.db.commit()
 
+    # Free tiers rate-limit per MINUTE far more often than per day, so a missing
+    # Retry-After header must not bench a provider until midnight. Measured: a
+    # 40-call burst 429'd Groq, and the old next-day default removed the primary
+    # provider from the whole eval - three utterances failed with no brain left.
+    # Short backoff first; a genuinely daily cap simply re-triggers and re-marks.
+    DEFAULT_BACKOFF_S = 60.0
+
     def mark_exhausted(self, provider: str, model: str, *,
                        retry_after_s: float | None, reason: str = "") -> None:
         """A live 429/402 arrived. Believe it over any predicted cap.
 
-        retry_after_s comes from the provider's header when present. When absent
-        we back off to the next UTC day, which is the common free-tier reset and
-        errs toward not hammering a provider that just said no.
+        retry_after_s comes from the provider's header when present; otherwise back
+        off DEFAULT_BACKOFF_S rather than assuming a daily quota was consumed.
         """
-        until = time.time() + retry_after_s if retry_after_s else _utc_day_start() + 86_400
+        until = time.time() + (retry_after_s or self.DEFAULT_BACKOFF_S)
         self.db.execute(
             "INSERT INTO exhausted (provider, model, until_ts, reason) VALUES (?,?,?,?) "
             "ON CONFLICT(provider, model) DO UPDATE SET until_ts=excluded.until_ts, reason=excluded.reason",
