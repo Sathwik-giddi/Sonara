@@ -133,7 +133,8 @@ def speak(text: str) -> None:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    # override=True: .env wins over any stale OS-level key (see bench_pipeline.py)
+    load_dotenv(ROOT / ".env", override=True)
     audio = record_utterance()
     text = transcribe(audio)
     reply = ask_llm(text) if text else None

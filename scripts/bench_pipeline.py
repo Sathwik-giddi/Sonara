@@ -71,7 +71,10 @@ def main() -> int:
     ap.add_argument("--turns", type=int, default=len(PROMPTS))
     args = ap.parse_args()
 
-    load_dotenv(ROOT / ".env")
+    # override=True: .env is this project's declared source of truth. Without it,
+    # a stale OS-level GROQ_API_KEY silently shadows the file and you debug a 401
+    # against a key you never placed.
+    load_dotenv(ROOT / ".env", override=True)
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         console.print("[red]GROQ_API_KEY not set in .env[/red]")
