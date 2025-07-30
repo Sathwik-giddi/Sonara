@@ -7,3 +7,8 @@ models/
 *.bin
 logs/
 .uv/
+
+# Sonara local tooling: your personal hooks — never commit these onto teammates
+
+# Sonara local tooling local memory (may contain project details — commit only after review)
+.sonara-local/
