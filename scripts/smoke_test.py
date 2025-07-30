@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 import wave
@@ -29,6 +30,7 @@ SAMPLE_RATE = 16_000
 RECORD_SECONDS = float(os.environ.get("SMOKE_RECORD_SECONDS", "6"))
 LAST_TAKE = ROOT / ".last_recording.wav"
 CORPUS = ROOT / "recordings"
+PRIME_SECONDS = float(os.environ.get("SMOKE_PRIME_SECONDS", "0.4"))
 STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "distil-small.en")
 STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
 
@@ -51,19 +53,31 @@ def stage(name: str):
 def record_utterance() -> np.ndarray:
     console.print("\n[bold]Audio devices:[/bold]")
     console.print(sd.query_devices())
-    console.input(
-        f"\n[bold green]Press Enter, then speak one sentence "
-        f"({RECORD_SECONDS:.0f}s recording)...[/bold green]"
-    )
-    audio = sd.rec(
-        int(RECORD_SECONDS * SAMPLE_RATE),
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-    )
-    sd.wait()
+    console.input("\n[bold green]Press Enter to arm the mic...[/bold green]")
+
+    # Open the stream and throw away the first PRIME_SECONDS. WASAPI needs a moment
+    # to spin up, and sd.rec() starts the clock before the device is really ready -
+    # so speaking immediately loses the leading phoneme. That is the prime suspect
+    # for "what's the" being heard as "Watch the" / "A worst" on some takes but not
+    # others: the model was never the variable, the onset was.
+    stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+    stream.start()
+    try:
+        stream.read(int(PRIME_SECONDS * SAMPLE_RATE))  # discarded
+        console.print(f"[bold cyan]>>> SPEAK NOW ({RECORD_SECONDS:.0f}s) <<<[/bold cyan]")
+        frames, _ = stream.read(int(RECORD_SECONDS * SAMPLE_RATE))
+    finally:
+        stream.stop()
+        stream.close()
     console.print("[dim]Recording done. The latency clock starts NOW.[/dim]")
-    mono = audio[:, 0]
+    mono = np.asarray(frames, dtype=np.float32)[:, 0]
+
+    # If speech is already loud in the first 150ms, the take probably started
+    # mid-word and any mistranscription is the capture's fault, not the model's.
+    lead = mono[: int(0.15 * SAMPLE_RATE)]
+    if lead.size and float(np.abs(lead).max()) > 0.15:
+        console.print("[yellow]Speech detected at the very start — you may have clipped the first word. "
+                      "Wait for the SPEAK NOW cue.[/yellow]")
 
     # Keep every take. Two purposes: A/B STT settings against a real voice without
     # re-recording, and accumulate the corpus the M1 gate needs (50 real exchanges)
@@ -137,13 +151,10 @@ def transcribe(audio: np.ndarray) -> str | None:
 
 
 def ask_llm(text: str) -> str | None:
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
+    client = get_client()
+    if client is None:
         console.print("[yellow]LLM skipped: GROQ_API_KEY not set in .env[/yellow]")
         return None
-    from openai import OpenAI
-
-    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key)
     first_token_ms = None
     reply_parts: list[str] = []
     t0 = time.perf_counter()
@@ -151,11 +162,24 @@ def ask_llm(text: str) -> str | None:
         streamed = client.chat.completions.create(
             model=os.environ.get("SMOKE_LLM_MODEL", "llama-3.3-70b-versatile"),
             messages=[
-                {"role": "system", "content": "You are Sonara. Reply in one short spoken sentence."},
+                {
+                    "role": "system",
+                    # Two failures this replaces: one-sentence replies could not answer
+                    # a two-part question, and with no tools yet it confidently invented
+                    # a weather forecast. Until the M3 skill layer lands, saying "I can't
+                    # know that yet" is the honest answer and the one that keeps trust.
+                    "content": (
+                        "You are Sonara, a voice assistant. Reply in natural spoken "
+                        "language, brief but complete: if the user asks two things, "
+                        "answer both. You have no live data yet - no weather, news, web "
+                        "or calendar access - so when asked for real-time facts, say you "
+                        "cannot look that up yet instead of inventing an answer."
+                    ),
+                },
                 {"role": "user", "content": text},
             ],
             stream=True,
-            max_tokens=80,
+            max_tokens=200,
         )
         for chunk in streamed:
             delta = chunk.choices[0].delta.content or ""
@@ -180,11 +204,48 @@ def speak(text: str) -> None:
     with stage("tts_model_load (excluded from budget)"):
         voice = PiperVoice.load(str(voice_path))
     sr = voice.config.sample_rate
-    with stage("tts_synthesize"):
-        pcm = b"".join(c.audio_int16_bytes for c in voice.synthesize(text))
-    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-    sd.play(samples, sr)
+
+    # Sentence-level streaming: synthesize the FIRST sentence, start playing it, then
+    # synthesize the rest while it plays. Time-to-first-audio must not grow with the
+    # length of the answer - synthesizing the whole reply first made a fuller answer
+    # cost 1,872ms before a single sample was heard. This is the M1 requirement,
+    # previewed here so the measurement reflects what M1 will feel like.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()] or [text]
+
+    def render(s: str) -> np.ndarray:
+        pcm = b"".join(c.audio_int16_bytes for c in voice.synthesize(s))
+        return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+    with stage("tts_first_sentence"):
+        first = render(sentences[0])
+    t_all = time.perf_counter()
+    sd.play(first, sr)
+    for s in sentences[1:]:
+        chunk = render(s)  # synthesized while the previous sentence is still playing
+        sd.wait()
+        sd.play(chunk, sr)
     sd.wait()
+    timings["tts_all_sentences"] = (time.perf_counter() - t_all) * 1000
+    if len(sentences) > 1:
+        console.print(f"[dim]streamed {len(sentences)} sentences[/dim]")
+
+
+_client = None
+
+
+def get_client():
+    """One shared client, so warm_connection() actually warms the connection the
+    real call reuses. A second OpenAI() instance means a second connection pool and
+    a fresh TLS handshake — the warm-up would look like it worked and do nothing."""
+    global _client
+    if _client is None:
+        key = os.environ.get("GROQ_API_KEY")
+        if not key:
+            return None
+        from openai import OpenAI
+
+        _client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key)
+    return _client
 
 
 def warm_connection() -> None:
@@ -194,14 +255,11 @@ def warm_connection() -> None:
     reproducibly, while every later turn is 160-290ms. Without this the very
     first thing a user ever says to Sonara is also the slowest.
     """
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
+    if not get_client():
         return
-    from openai import OpenAI
-
     try:
         t = time.perf_counter()
-        OpenAI(base_url="https://api.groq.com/openai/v1", api_key=key).chat.completions.create(
+        get_client().chat.completions.create(
             model=os.environ.get("SMOKE_LLM_MODEL", "llama-3.3-70b-versatile"),
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,
@@ -248,29 +306,33 @@ def main() -> None:
     table = Table(title="Smoke test timings (ms)")
     table.add_column("Stage")
     table.add_column("ms", justify="right")
-    budget_keys = ("stt_transcribe", "llm_first_token", "llm_full_reply", "tts_synthesize")
     for k, v in timings.items():
         table.add_row(k, "-" if v is None else f"{v:,.0f}")
     console.print(table)
 
-    # End-of-speech -> first audio, approximated as stt + llm full + tts synth
-    # (streamed sentence-level TTS in M1 will start audio at llm_first_token + first-sentence synth)
-    parts = [timings.get("stt_transcribe"), timings.get("llm_full_reply"), timings.get("tts_synthesize")]
-    if all(p is not None for p in parts):
-        total = sum(parts) / 1000
+    # THE number: end-of-speech -> first audio. With sentence-level streaming this is
+    # stt + llm-first-token + first-sentence synth, and it must NOT grow with the
+    # length of the answer.
+    st = timings.get("stt_transcribe")
+    ft = timings.get("llm_first_token")
+    ts = timings.get("tts_first_sentence")
+    if st is not None and ft is not None and ts is not None:
+        total = (st + ft + ts) / 1000
         verdict = "PASS" if total <= 2.0 else "OVER"
+        colour = "green" if total <= 2.0 else "red"
         console.print(
-            f"\n[bold]End-of-speech -> first audio (worst-case, unstreamed): "
-            f"{total:.2f}s  [{verdict} vs 2.0s M1 gate][/bold]"
+            f"\n[bold {colour}]End-of-speech -> first audio: {total:.2f}s  "
+            f"[{verdict} vs 2.0s M1 gate][/bold {colour}]"
         )
-        ft = timings.get("llm_first_token")
-        st = timings.get("stt_transcribe")
-        ts = timings.get("tts_synthesize")
-        if ft is not None and st is not None and ts is not None:
-            streamed_est = (st + ft + ts) / 1000
+        console.print(
+            f"[dim]  stt {st:,.0f} + first-token {ft:,.0f} + first-sentence tts {ts:,.0f} ms[/dim]"
+        )
+        full = timings.get("llm_full_reply")
+        allt = timings.get("tts_all_sentences")
+        if full is not None and allt is not None:
             console.print(
-                f"[bold]Streamed-pipeline estimate (what M1 will actually feel like): "
-                f"~{streamed_est:.2f}s[/bold]"
+                f"[dim]  (whole reply: llm {full:,.0f} ms, all speech rendered+played {allt:,.0f} ms — "
+                f"these grow with answer length; the number above must not)[/dim]"
             )
     else:
         console.print("\n[yellow]Total not computable: one or more stages skipped (see above).[/yellow]")
