@@ -13,7 +13,7 @@ Windows-first, router-first personal voice assistant. Runs at $0 forever. Former
    - Google AI Studio: https://aistudio.google.com/apikey
    - NVIDIA: https://build.nvidia.com → nvapi- key (one-time trial credits)
    - OpenRouter: https://openrouter.ai/keys
-2. `./setup.ps1` — installs the Python 3.12 env via uv, downloads Kokoro TTS model files, creates `.env`
+2. `./setup.ps1` — installs the Python env via uv, downloads the Piper TTS voice, creates `.env`
 3. Paste `GROQ_API_KEY` into `.env` (only key the smoke test needs)
 4. `uv run scripts/smoke_test.py` — speak one sentence, get every stage timed
 
@@ -21,7 +21,7 @@ The number that matters: **end-of-speech → first audio**. M1 gate: p50 ≤ 2.0
 
 ## Layout
 
-- `scripts/smoke_test.py` — M0 staged latency test (record → faster-whisper STT → Groq LLM → Kokoro TTS)
+- `scripts/smoke_test.py` — M0 staged latency test (record → faster-whisper STT → Groq LLM → Piper TTS; Piper won the measured bake-off vs Kokoro on this CPU)
 - `config/caps.yaml` — dated free-tier caps config, seed of the M2 quota ledger
 - `setup.ps1` — one-time environment setup
 

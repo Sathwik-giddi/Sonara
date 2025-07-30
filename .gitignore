@@ -7,8 +7,13 @@ models/
 *.bin
 logs/
 .uv/
+.obsidian/
 
 # Sonara local tooling: your personal hooks — never commit these onto teammates
 
 # Sonara local tooling local memory (may contain project details — commit only after review)
 .sonara-local/
+
+# Obsidian vault: private session history and design memory.
+# Lives inside the repo for convenience; must NEVER publish when Sonara goes open source.
+Sonara Intelligence/

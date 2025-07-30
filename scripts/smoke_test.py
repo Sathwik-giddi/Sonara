@@ -114,17 +114,20 @@ def ask_llm(text: str) -> str | None:
 
 
 def speak(text: str) -> None:
-    onnx = MODELS / "kokoro-v1.0.onnx"
-    voices = MODELS / "voices-v1.0.bin"
-    if not (onnx.exists() and voices.exists()):
-        console.print("[yellow]TTS skipped: run setup.ps1 to download Kokoro model files[/yellow]")
+    # Piper won the 2026-07-30 TTS bake-off on this CPU: ~1s/sentence warm vs
+    # Kokoro's 2.4-7.7s (and Kokoro's ConvTranspose op crashes under DirectML).
+    voice_path = MODELS / os.environ.get("SMOKE_TTS_VOICE", "en_US-lessac-medium.onnx")
+    if not voice_path.exists():
+        console.print("[yellow]TTS skipped: run setup.ps1 to download the Piper voice[/yellow]")
         return
-    from kokoro_onnx import Kokoro
+    from piper import PiperVoice
 
     with stage("tts_model_load (excluded from budget)"):
-        kokoro = Kokoro(str(onnx), str(voices))
+        voice = PiperVoice.load(str(voice_path))
+    sr = voice.config.sample_rate
     with stage("tts_synthesize"):
-        samples, sr = kokoro.create(text, voice="af_heart", speed=1.0)
+        pcm = b"".join(c.audio_int16_bytes for c in voice.synthesize(text))
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     sd.play(samples, sr)
     sd.wait()
 

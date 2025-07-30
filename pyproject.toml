@@ -9,10 +9,10 @@ dependencies = [
     "sounddevice>=0.4.6",
     "numpy>=1.26",
     "faster-whisper>=1.0",
-    "kokoro-onnx>=0.4",
     "openai>=1.40",
     "python-dotenv>=1.0",
     "rich>=13.7",
+    "piper-tts>=1.6.0",
 ]
 
 [tool.uv]

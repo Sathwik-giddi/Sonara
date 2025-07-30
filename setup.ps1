@@ -6,12 +6,13 @@ Write-Host "== Sonara setup ==" -ForegroundColor Cyan
 # 1. Python env (uv pins 3.12 per pyproject; downloads it if missing)
 uv sync
 
-# 2. Kokoro TTS model files (~330MB total), skipped if already present
+# 2. Piper TTS voice (~60MB), skipped if already present.
+# Piper won the 2026-07-30 bake-off on this CPU (~1s/sentence vs Kokoro's 2.4-7.7s).
 $models = Join-Path $PSScriptRoot 'models'
 New-Item -ItemType Directory -Force $models | Out-Null
 $files = @(
-    @{ Name = 'kokoro-v1.0.onnx'; Url = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx' },
-    @{ Name = 'voices-v1.0.bin';  Url = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin' }
+    @{ Name = 'en_US-lessac-medium.onnx';      Url = 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx' },
+    @{ Name = 'en_US-lessac-medium.onnx.json'; Url = 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json' }
 )
 foreach ($f in $files) {
     $dest = Join-Path $models $f.Name
@@ -20,7 +21,7 @@ foreach ($f in $files) {
     try {
         Invoke-WebRequest -Uri $f.Url -OutFile $dest
     } catch {
-        Write-Warning "Download failed for $($f.Name). Grab it manually from https://github.com/thewh1teagle/kokoro-onnx/releases and place it in .\models\ — the smoke test skips TTS until then."
+        Write-Warning "Download failed for $($f.Name). Grab it manually from https://huggingface.co/rhasspy/piper-voices and place it in .\models\ — the smoke test skips TTS until then."
     }
 }
 
