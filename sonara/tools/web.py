@@ -77,9 +77,11 @@ def get_weather(place: str) -> dict:
 
 @registry.tool(
     name="web_search", pack=PACK,
-    description=("Search the web for current information: news, events, facts, prices, "
-                 "anything that changed recently. Use whenever the answer depends on "
-                 "something after your training data."),
+    description=("Search the web for current information: news, events, prices, anything "
+                 "that changed recently. Returns titles and fragments as RAW MATERIAL - "
+                 "read them and explain what is actually happening in your own words. "
+                 "Never read the titles or links back to the user. Search again with a "
+                 "different query if the first results do not answer the question."),
     parameters={
         "type": "object",
         "properties": {
@@ -89,16 +91,19 @@ def get_weather(place: str) -> dict:
         "required": ["query"],
     },
 )
-def web_search(query: str, limit: int = 4) -> list[dict]:
+def web_search(query: str, limit: int = 5) -> list[dict]:
     from ddgs import DDGS
 
     n = max(1, min(int(limit), 8))
     out = []
     with DDGS() as d:
         for r in d.text(query, max_results=n):
+            # Longer snippets, and the URL is dropped entirely. 280 characters was not
+            # enough to say anything real about a story, so the model fell back on
+            # reading titles aloud. And a spoken assistant has no use for a link -
+            # carrying one only invites it to read the address out.
             out.append({"title": r.get("title", ""),
-                        "snippet": (r.get("body") or "")[:280],
-                        "url": r.get("href", "")})
+                        "text": (r.get("body") or "")[:600]})
     return out
 
 
