@@ -32,7 +32,11 @@ RECORD_SECONDS = float(os.environ.get("SMOKE_RECORD_SECONDS", "6"))
 LAST_TAKE = ROOT / ".last_recording.wav"
 CORPUS = ROOT / "recordings"
 PRIME_SECONDS = float(os.environ.get("SMOKE_PRIME_SECONDS", "0.4"))
-STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "distil-small.en")
+# medium.en, chosen by A/B on real recordings of THIS voice (2026-08-01). On the same
+# three takes distil-small.en produced "what the airiness" where medium.en produced
+# "what the heck". It costs ~440ms more (273 -> 710ms) and the budget has it: measured
+# exchanges ran 0.58-0.81s against a 2.0s gate, so this lands ~1.0-1.25s.
+STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "medium.en")
 STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
 
 console = Console()
@@ -72,9 +76,17 @@ def stage(name: str):
     return _Timer()
 
 
+_devices_shown = False
+
+
 def record_utterance() -> np.ndarray:
-    console.print("\n[bold]Audio devices:[/bold]")
-    console.print(sd.query_devices())
+    # Once per process, not once per exchange. Printing 24 device lines before all 50
+    # gate exchanges buries the only lines that matter.
+    global _devices_shown
+    if not _devices_shown:
+        console.print("\n[bold]Audio devices:[/bold]")
+        console.print(sd.query_devices())
+        _devices_shown = True
     console.input("\n[bold green]Press Enter to arm the mic...[/bold green]")
 
     # Open the stream and throw away the first PRIME_SECONDS. WASAPI needs a moment

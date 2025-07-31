@@ -207,7 +207,12 @@ def run_exchanges(rows: list[dict]) -> None:
     i = done
     while i < TARGET_EXCHANGES:
         prompt = PROMPTS[i % len(PROMPTS)]
-        console.print(f"\n[bold cyan]{i+1}/{TARGET_EXCHANGES}[/bold cyan]  say: [bold]{prompt}[/bold]")
+        # The prompt is a SUGGESTION, not a script. Latency is measured from
+        # end-of-speech to first audio and does not care what was said - the list
+        # exists only to spread traffic across task classes so the p50 reflects real
+        # routing. Say whatever you like; talking naturally is the better test.
+        console.print(f"\n[bold cyan]{i+1}/{TARGET_EXCHANGES}[/bold cyan]  "
+                      f"suggestion (say anything): [bold]{prompt}[/bold]")
         st.timings.clear()
         audio = st.record_utterance()
         text = st.transcribe(audio)
