@@ -32,6 +32,37 @@ from .tools import ConfirmationRequired, Executor, registry
 # paths. These never re-enter a hosted prompt; the agent stops and answers locally.
 LOCAL_ONLY = {"search_notes", "list_reminders", "find_file"}
 
+def load_persona(name: str | None = None) -> tuple[str, str]:
+    """Build the system prompt from config/personas.yaml. Returns (prompt, tts_voice).
+
+    Personality lives in config, not in code, so it can be A/B'd by ear rather than
+    argued about in the abstract - which is the only way anyone has ever chosen a voice.
+    """
+    import os
+    from pathlib import Path
+
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config/personas.yaml").read_text())
+    key = name or os.environ.get("SONARA_PERSONA") or cfg.get("default", "cloud")
+    p = cfg["personas"].get(key) or cfg["personas"][cfg["default"]]
+    return (f"{p['prompt'].strip()}\n\n{cfg['universal'].strip()}\n\n{TOOLS_BLOCK}",
+            p.get("voice", "en_US-lessac-medium"))
+
+
+# The capability half of the prompt: identical across personas, because what it CAN do
+# is not a matter of character.
+TOOLS_BLOCK = (
+    "You have tools - use them rather than guessing:\n"
+    "- weather -> get_weather; news, prices, anything current -> web_search\n"
+    "- facts about a person, place or thing -> look_up\n"
+    "- time or date -> get_time; apps, media, volume, files -> the pc tools\n"
+    "- reminders and notes -> set_reminder, add_note, search_notes\n"
+    "You may use several tools in a row when a request needs it: check something, then "
+    "act on what you found. If a tool fails, recover - answer from what you know or try "
+    "a real tool."
+)
+
 SYSTEM = (
     "You are Sonara, a voice assistant on Windows. Reply in natural spoken language, "
     "brief but complete.\n"
@@ -203,7 +234,21 @@ class Agent:
                 {"role": "tool", "tool_call_id": call.id, "content": str(out.result)[:2000]},
             ]
         else:
-            said = "That turned into more steps than I could finish. Ask me a smaller piece?"
+            # Steps exhausted. Asked for something it has no tool for, a model will keep
+            # trying plausible-sounding tools until the cap - and the user should never
+            # see the cap. One final call with NO tools attached forces it to say what
+            # it actually can and cannot do, in its own voice.
+            try:
+                _c, said, choice, first_ms = self.router.chat_with_tools(
+                    self._messages(scratch + [{
+                        "role": "user",
+                        "content": "You have no tool for this. Tell the user plainly what "
+                                   "you cannot do, in one sentence, in your own voice.",
+                    }]),
+                    [], task=Task.CHAT,
+                )
+            except NoProviderAvailable:
+                said = "I can't do that one."
 
         said = (said or "").strip() or "I'm not sure how to answer that."
         self.history.append({"role": "assistant", "content": said})
