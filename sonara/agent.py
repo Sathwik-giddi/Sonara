@@ -282,7 +282,10 @@ class Agent:
         r"weather|temperat|rain|snow|sunny|cold|hot|jacket|umbrella|outside|forecast|"
         r"news|headline|happen(ed|ing)|price|stock|bitcoin|"
         r"time|clock|date|what day|today|tonight|tomorrow|"
-        r"coming up|my (notes|reminders|jobs|schedule)|working on)\b", re.I)
+        # NO trailing \b. Stems must match inflections - with it, "rain" failed to match
+        # "raining" and "happen" failed "happening", so "is it raining out" got no tools
+        # at all. Every stem in this list was silently broken by one character.
+        r"coming up|my (notes|reminders|jobs|schedule)|working on)", re.I)
 
     def _tools_for(self, text: str) -> list[dict]:
         """Decide whether this utterance wants an action.
@@ -297,11 +300,48 @@ class Agent:
         tier was built for. Generalising to phrasings nobody wrote down is what models
         are for; hand-maintaining a vocabulary is what they replace.
         """
-        if self._WANTS_TOOL.search(text or ""):
-            return registry.openai_schemas()
-        if self._classify_wants_action(text):
-            return registry.openai_schemas()
+        if self._WANTS_TOOL.search(text or "") or self._classify_wants_action(text):
+            return registry.openai_schemas(self._packs_for(text))
         return []
+
+    # Sending all 20 schemas costs 1,699 tokens on EVERY action turn - the single
+    # largest line in the budget, and most of it describes tools that could not
+    # possibly apply. "What's the time" does not need the notes pack. Narrowing to the
+    # plausible packs cuts that by roughly three quarters; when nothing matches
+    # confidently we send everything, so a narrowing miss costs tokens, never capability.
+    _PACK_HINTS: list[tuple[str, str]] = [
+        ("pc_control", r"open|launch|close|fire up|run|play|put on|pause|stop|skip|next|"
+                       r"previous|track|mute|volume|loud|quiet|crank|turn (it|the)|"
+                       r"screenshot|capture|screen|file|folder|resume|find|locate|dig up|"
+                       r"hunt|where (is|did)|time|clock|date|what day|today|tonight"),
+        ("notes", r"remind|reminder|nudge|ping|wake me|note|jot|scribble|write|"
+                  r"don'?t (let me )?forget|remember|coming up|my (notes|reminders)|"
+                  r"schedule|later|tomorrow|tonight|at \d|in \d"),
+        ("web", r"weather|temperat|rain|snow|sunny|cold|hot|jacket|umbrella|outside|"
+                r"forecast|news|headline|happen|price|stock|bitcoin|search|google|"
+                r"look up|who (is|was)|what is|tell me about"),
+        ("autonomy", r"later|check .*(at|in) |tell me when|watch|keep an eye|"
+                     r"what are you (working|doing)|my jobs|cancel"),
+    ]
+
+    def _packs_for(self, text: str) -> list[str] | None:
+        """Narrowing is OFF by default, and the measurement says why.
+
+        Sending one pack instead of twenty saves 1,159 tokens per action turn
+        (1,699 -> ~500). It also cost 7.5 points of action recall on the corpus
+        (47.5% -> 40.0%), because when the pack guess is wrong the right tool is not
+        merely deprioritised, it is ABSENT.
+
+        Recall is the weaker number right now, so capability wins. Turn it on with
+        SONARA_NARROW_PACKS=1 once recall is comfortably high and tokens are the
+        binding constraint - that is a real future trade, just not today's.
+        """
+        import os
+
+        if os.environ.get("SONARA_NARROW_PACKS") != "1":
+            return None
+        hits = [p for p, pat in self._PACK_HINTS if re.search(pat, text or "", re.I)]
+        return hits or None      # None == every pack
 
     _CLASSIFIER_SYSTEM = (
         "Decide if the user wants the assistant to DO something or to look up "
