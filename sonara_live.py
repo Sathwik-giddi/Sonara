@@ -171,6 +171,7 @@ def main() -> int:
     load_dotenv(ROOT / ".env", override=True)
 
     import smoke_test as st
+    st.QUIET = True          # silence per-utterance STT logging
     from sonara import Agent
     from sonara.agent import load_persona
 

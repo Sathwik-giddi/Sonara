@@ -230,7 +230,11 @@ class Memory:
         parts = []
         if core:
             parts.append(
-                "ESTABLISHED FACTS about the person you are speaking to. These are true "
+                "IDENTITY: YOU are Sonara. That is your name and it never changes. The "
+                "facts below are about the OTHER PERSON in this conversation - the human "
+                "you are speaking to. They are not autobiography. Asked your own name, "
+                "the answer is always Sonara; asked THEIR name, use the list.\n"
+                "ESTABLISHED FACTS about the human you are speaking to. These are true "
                 "and you ALREADY KNOW them.\n"
                 "ANSWER FROM THIS LIST DIRECTLY. Do NOT call a tool for anything listed "
                 "here - look_up and web_search are for the world, not for this person. "

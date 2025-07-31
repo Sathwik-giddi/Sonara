@@ -123,6 +123,7 @@ class Agent:
         self._memory_context = ""
         self.learned_this_turn: list[str] = []
         self.suggest_skill: str | None = None
+        self._steps_this_turn: list[Step] = []
         # Persistent across sessions. Without this every conversation starts as a
         # stranger, which is the largest single gap between an assistant and someone.
         self.memory = memory or (Memory() if use_memory else None)
@@ -138,6 +139,41 @@ class Agent:
         if self._memory_context:
             system = f"{system}\n\n{self._memory_context}"
         return ([{"role": "system", "content": system}] + self.history + (extra or []))
+
+    @staticmethod
+    def _calls_in_text(said: str) -> list:
+        """Recover tool calls a model wrote as TEXT instead of using the API field.
+
+        Observed live: llama-3.3-70b answered "what time is it and what's your name"
+        with the literal string
+            {"name": "get_time", "parameters": {}}; {"name": "look_up", ...}
+        as its message content. Nothing was in tool_calls, so the agent took that JSON
+        to be the answer and SPOKE IT ALOUD.
+
+        This is a known failure mode that worsens with more tools and longer prompts, and
+        every serious agent framework carries a parser like this. Recovering the intent
+        is strictly better than reading punctuation to someone.
+        """
+        found = []
+        for m in re.finditer(
+            r'\{\s*"name"\s*:\s*"([A-Za-z_]\w*)"\s*,\s*'
+            r'"(?:parameters|arguments|args)"\s*:\s*(\{.*?\})\s*\}', said or "", re.S,
+        ):
+            name, raw = m.group(1), m.group(2)
+            if registry.get(name) is None:
+                continue
+
+            class _Fn:
+                pass
+
+            class _Call:
+                pass
+
+            c, f = _Call(), _Fn()
+            f.name, f.arguments = name, raw
+            c.id, c.function, c.type = f"recovered_{len(found)}", f, "function"
+            found.append(c)
+        return found
 
     @staticmethod
     def _args_of(call) -> dict:
@@ -166,6 +202,92 @@ class Agent:
             return f"I found {len(rows)}. The first is {Path(rows[0]).name}"
         return str(result)
 
+    # Identity questions have KNOWN answers, so no model should be involved. Four
+    # separate prompt fixes failed to keep "your name" and "my name" apart, and the
+    # answers flipped between identical runs - a coin flip, not a tuning problem.
+    # Deterministic rules cost zero tokens, zero latency, and cannot be wrong. Same
+    # principle as the intent shortcut that already handles "pause the music".
+    _WHO_ARE_YOU = re.compile(
+        r"\b(what(?:'s| is)? your name|who are you|what are you called|"
+        r"what should i call you)\b", re.I)
+    _WHO_AM_I = re.compile(
+        r"\b(what(?:'s| is)? my name|who am i|what do you call me|"
+        r"do you (?:know|remember) my name)\b", re.I)
+
+    def _deterministic_answer(self, text: str) -> str | None:
+        if self._WHO_ARE_YOU.search(text):
+            return "Sonara."
+        if self._WHO_AM_I.search(text):
+            name = self.memory.name() if self.memory else None
+            return f"{name}." if name else "You haven't told me your name yet."
+        return None
+
+    def _memory_shortcircuit(self, name: str, args: dict) -> str | None:
+        """Refuse to search the world for something we already know about this person.
+
+        THREE prompt fixes failed to stop this. Asked "what is your name" the model
+        called look_up("Vaish") and read back a Wikipedia article on the Vaishya caste;
+        asked "what is my name" it searched again rather than reading the fact in its
+        own context. Prompts are advisory. Code is binding.
+
+        This intercepts encyclopaedia and web lookups whose subject is the assistant or
+        the user, and answers from memory instead - deterministically, every time.
+        """
+        if name not in ("look_up", "web_search"):
+            return None
+        q = str(args.get("topic") or args.get("query") or "").strip().lower()
+        if not q:
+            return None
+
+        if "sonara" in q or "your name" in q or q in ("you", "yourself"):
+            return "You are Sonara. That is your own name - no lookup required."
+
+        if self.memory:
+            user_name = (self.memory.name() or "").lower()
+            facts = self.memory.core_facts()
+            personal = any(kw in q for kw in ("my name", "i am", "me", "my "))
+            if (user_name and user_name in q) or personal:
+                known = "; ".join(f.text for f in facts) or "nothing recorded yet"
+                return (f"That subject is the person you are talking to, not an "
+                        f"encyclopaedia topic. What you know: {known}")
+        return None
+
+    def _wrap_up(self, scratch: list[dict]) -> str:
+        """Force a spoken answer with NO tools attached.
+
+        Used whenever the loop ends without the model having said anything - the step
+        cap, or the repeat guard. Removing the tools is the point: with them available a
+        stuck model simply calls another one, and the user hears an internal message
+        instead of an answer.
+        """
+        # State plainly what WAS done. Without this the model confabulated success:
+        # asked to book a flight it answered "I've booked a flight to Tokyo for you,
+        # the details are in your reminders" having booked nothing at all. Claiming a
+        # completed action that never happened is the worst failure this system can
+        # have - worse than refusing, worse than being slow.
+        done = [s.tool for s in self._steps_this_turn if s.ok]
+        # Phrase this as a CONSTRAINT, never as a sentence. The first version read
+        # "You successfully used: web_search" and the model repeated it back to the user
+        # verbatim - "I successfully used web_search." Anything quotable in an internal
+        # note will eventually be quoted.
+        ledger = (f"(internal note, never mention tool names to the user: actions that "
+                  f"actually succeeded this turn = {done or 'NONE'})")
+        try:
+            _c, said, _choice, _ms = self.router.chat_with_tools(
+                self._messages(scratch + [{
+                    "role": "user",
+                    "content": f"{ledger} Reply to the person now in one or two spoken "
+                               f"sentences, using only what those actions returned. If "
+                               f"nothing succeeded, tell them plainly that you cannot do "
+                               f"it - never claim an action you did not complete, and "
+                               f"never name a tool.",
+                }]),
+                [], task=Task.CHAT,
+            )
+            return said
+        except NoProviderAvailable:
+            return "I can't do that one."
+
     # ---------- the loop ----------
 
     def turn(self, text: str) -> TurnResult:
@@ -178,6 +300,14 @@ class Agent:
             self.history += [{"role": "user", "content": text},
                              {"role": "assistant", "content": said}]
             return TurnResult(said)
+
+        # Answer identity questions without a model: known answer, zero tokens, and it
+        # cannot get the pronouns backwards the way four prompt revisions did.
+        fixed = self._deterministic_answer(text)
+        if fixed is not None:
+            self.history += [{"role": "user", "content": text},
+                             {"role": "assistant", "content": fixed}]
+            return TurnResult(fixed)
 
         task = classify(text)
 
@@ -196,7 +326,9 @@ class Agent:
 
         self.history.append({"role": "user", "content": text})
         scratch: list[dict] = []
+        seen: set[tuple] = set()
         steps: list[Step] = []
+        self._steps_this_turn = steps
         choice = None
         first_ms = 0.0
         tools = registry.openai_schemas()
@@ -212,10 +344,33 @@ class Agent:
                 break
 
             if not calls:
-                break  # the model is done and wants to speak
+                # Before believing it wants to speak, check whether it wrote tool calls
+                # into the text instead of the API field.
+                calls = self._calls_in_text(said)
+                if calls:
+                    said = ""
+                else:
+                    break  # genuinely done and wants to speak
 
             call = calls[0]
             name, args = call.function.name, self._args_of(call)
+            recovered = str(getattr(call, "id", "")).startswith("recovered_")
+
+            # HARD REPEAT GUARD. A model that re-requests the same call with the same
+            # arguments is stuck, and every extra lap costs a request and a second of
+            # the user's life. Seen live: get_time four times in one turn.
+            sig = (name, repr(sorted(args.items())))
+            if sig in seen:
+                said = self._wrap_up(scratch)
+                break
+            seen.add(sig)
+            guard = self._memory_shortcircuit(name, args)
+            if guard is not None:
+                steps.append(Step(name, args, True, guard))
+                scratch.append({"role": "user", "content":
+                                f"Do not search for that. {guard} Answer in plain speech now."})
+                continue
+
             try:
                 out = self.executor.execute(name, args)
             except ConfirmationRequired as c:
@@ -262,18 +417,29 @@ class Agent:
             # the model never registered that its call had been answered - it called
             # get_weather four times in a row and hit the step cap. The id is the part
             # that closes the loop.
-            scratch += [
-                {
-                    "role": "assistant",
-                    "content": said or None,
-                    "tool_calls": [{
-                        "id": call.id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": call.function.arguments or "{}"},
-                    }],
-                },
-                {"role": "tool", "tool_call_id": call.id, "content": str(out.result)[:2000]},
-            ]
+            if recovered:
+                # The model wrote this call as prose rather than using the API, so
+                # replying with a `tool` message keyed to an id it never issued means
+                # nothing to it - it just re-emits the same call. Answer in the register
+                # it actually used.
+                scratch.append({"role": "user",
+                                "content": f"Result of {name}: {str(out.result)[:1200]}. "
+                                           f"Now answer the question in plain speech."})
+            else:
+                scratch += [
+                    {
+                        "role": "assistant",
+                        "content": said or None,
+                        "tool_calls": [{
+                            "id": call.id,
+                            "type": "function",
+                            "function": {"name": name,
+                                         "arguments": call.function.arguments or "{}"},
+                        }],
+                    },
+                    {"role": "tool", "tool_call_id": call.id,
+                     "content": str(out.result)[:2000]},
+                ]
         else:
             # Steps exhausted. Asked for something it has no tool for, a model will keep
             # trying plausible-sounding tools until the cap - and the user should never

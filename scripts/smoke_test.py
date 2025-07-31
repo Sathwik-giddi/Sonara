@@ -38,6 +38,10 @@ PRIME_SECONDS = float(os.environ.get("SMOKE_PRIME_SECONDS", "0.4"))
 # exchanges ran 0.58-0.81s against a 2.0s gate, so this lands ~1.0-1.25s.
 STT_MODEL = os.environ.get("SMOKE_STT_MODEL", "medium.en")
 STT_BEAM = int(os.environ.get("SMOKE_STT_BEAM", "5"))
+# Live mode calls transcribe() on every VAD trigger, including false ones. Printing
+# the model banner and an empty "Heard:" for each buried the actual conversation.
+QUIET = False
+_stt_model = None      # loaded once per process, not once per utterance
 
 console = Console()
 timings: dict[str, float | None] = {}
@@ -147,22 +151,30 @@ def transcribe(audio: np.ndarray) -> str | None:
         console.print(f"[red]STT skipped: faster-whisper not importable ({e})[/red]")
         return None
 
-    # ctranslate2 fails LAZILY: the constructor succeeds without the CUDA DLLs and
-    # only dies on the first encode. So warm up inside the try, or the fallback
-    # never fires and the crash lands mid-conversation instead.
+    # LOAD ONCE. This used to construct WhisperModel on EVERY call - invisible in a
+    # one-shot smoke test, catastrophic in a continuous loop: medium.en takes seconds
+    # to load, and it was being paid per utterance. Measured live at 10.66s for a turn
+    # that should be under one.
+    global _stt_model
     warm = np.zeros(SAMPLE_RATE, dtype=np.float32)
-    with stage("stt_model_load (excluded from budget)"):
-        try:
-            model = WhisperModel(STT_MODEL, device="cuda", compute_type="int8")
-            list(model.transcribe(warm, language="en", beam_size=1)[0])
-            console.print(f"[dim]STT {STT_MODEL} on CUDA (beam {STT_BEAM})[/dim]")
-        except Exception as e:
-            console.print(
-                f"[yellow]CUDA unavailable ({type(e).__name__}: "
-                f"{str(e).splitlines()[0][:70]}) — STT on CPU[/yellow]"
-            )
-            model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8")
-            list(model.transcribe(warm, language="en", beam_size=1)[0])
+    if _stt_model is None:
+        with stage("stt_model_load (excluded from budget)"):
+            try:
+                _stt_model = WhisperModel(STT_MODEL, device="cuda", compute_type="int8")
+                # ctranslate2 fails LAZILY: the constructor succeeds without the CUDA
+                # DLLs and only dies on the first encode, so warm up inside the try or
+                # the fallback never fires and the crash lands mid-conversation.
+                list(_stt_model.transcribe(warm, language="en", beam_size=1)[0])
+                if not QUIET:
+                    console.print(f"[dim]STT {STT_MODEL} on CUDA (beam {STT_BEAM})[/dim]")
+            except Exception as e:
+                console.print(
+                    f"[yellow]CUDA unavailable ({type(e).__name__}: "
+                    f"{str(e).splitlines()[0][:70]}) — STT on CPU[/yellow]"
+                )
+                _stt_model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8")
+                list(_stt_model.transcribe(warm, language="en", beam_size=1)[0])
+    model = _stt_model
 
     with stage("stt_transcribe"):
         # vad_filter drops the silence around the utterance; a fixed 6s buffer is
@@ -180,7 +192,8 @@ def transcribe(audio: np.ndarray) -> str | None:
             condition_on_previous_text=False,
         )
         text = " ".join(s.text.strip() for s in segments).strip()
-    console.print(f"[bold]Heard:[/bold] {text!r}")
+    if not QUIET:
+        console.print(f"[bold]Heard:[/bold] {text!r}")
     return text or None
 
 
