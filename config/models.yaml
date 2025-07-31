@@ -50,7 +50,7 @@ routes:
   chat:
     - {provider: groq,         model: llama-3.3-70b-versatile}
     - {provider: nvidia_nim,   model: meta/llama-3.1-8b-instruct}
-    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+    - {provider: ollama_local, model: qwen2.5:3b}
 
   # Tool/function calling: PC control, reminders, media. Correctness of the call
   # beats eloquence - a malformed call is a failed action. Nemotron is here
@@ -58,7 +58,7 @@ routes:
   command:
     - {provider: groq,         model: llama-3.3-70b-versatile}
     - {provider: nvidia_nim,   model: nvidia/llama-3.3-nemotron-super-49b-v1.5}
-    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+    - {provider: ollama_local, model: qwen2.5:3b}
 
   # Planning, comparison, multi-step analysis. THIS is why the deep tier exists:
   # a 550B model answering in 1.4s, free. Routed here even when Groq has headroom,
@@ -67,7 +67,7 @@ routes:
     - {provider: nvidia_nim,   model: nvidia/nemotron-3-ultra-550b-a55b}
     - {provider: nvidia_nim,   model: nvidia/nemotron-3-super-120b-a12b}
     - {provider: groq,         model: llama-3.3-70b-versatile}
-    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+    - {provider: ollama_local, model: qwen2.5:3b}
 
   # Code. Every dedicated coder model on NIM 404s on this account (codestral,
   # deepseek-coder, codellama all listed but not served), so this uses the
@@ -76,14 +76,14 @@ routes:
     - {provider: nvidia_nim,   model: nvidia/nemotron-3-super-120b-a12b}
     - {provider: nvidia_nim,   model: openai/gpt-oss-20b}
     - {provider: groq,         model: llama-3.3-70b-versatile}
-    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+    - {provider: ollama_local, model: qwen2.5:3b}
 
   # Long input, short output. Needs context window, not brilliance - so keep the
   # fast tier and save scarce deep-tier requests for work that needs thinking.
   summarize:
     - {provider: groq,         model: llama-3.3-70b-versatile}
     - {provider: nvidia_nim,   model: nvidia/nemotron-3-super-120b-a12b}
-    - {provider: ollama_local, model: qwen3-4b-instruct-q4}
+    - {provider: ollama_local, model: qwen2.5:3b}
 
 # Hard ceilings per tier. A voice assistant must never hang: meta/llama-3.3-70b
 # on NIM read-timed out at 180s, and the OpenAI client's default is 600s. Anything

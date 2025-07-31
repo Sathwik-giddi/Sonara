@@ -37,5 +37,5 @@ providers:
   ollama_local:
     base_url: http://localhost:11434/v1
     tier: local
-    pinned_model: qwen3-4b-instruct-q4     # install Ollama at M2
+    pinned_model: qwen2.5:3b     # install Ollama at M2
     caps: none

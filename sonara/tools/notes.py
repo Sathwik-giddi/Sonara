@@ -132,7 +132,12 @@ def due_reminders() -> list[str]:
 
 @registry.tool(
     name="add_note", pack=PACK,
-    description="Append a note to today's note file.",
+    # Description IS the prompt. GATE-M3 v1 missed 4 of 40 utterances purely because
+    # this said "append a note" while people say "jot down" and "write this down".
+    # The listed phrasings are the ones the eval actually caught failing.
+    description=("Save something the user wants written down or remembered. Use this for "
+                 "'note down X', 'jot down X', 'write this down', 'make a note that X', "
+                 "'save a note about X', 'remember that X'."),
     parameters={
         "type": "object",
         "properties": {"text": {"type": "string", "description": "the note to save"}},

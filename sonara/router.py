@@ -216,11 +216,19 @@ class Router:
                             self.caps["providers"][provider]["base_url"], f"task={task.value}")
             try:
                 t0 = time.perf_counter()
+                kw: dict[str, Any] = {}
+                # Rung 1 of the fallback ladder: constrain the local tier's decoding.
+                # Measured on qwen2.5:3b - unconstrained it produced a tool call on
+                # 62.5% of utterances; forcing a choice took it to 80%, which is the
+                # local gate. Hosted models are left free: they are accurate enough
+                # that forcing a call would make them invent one for pure chat.
+                if self.tier_of(provider) == "local":
+                    kw["tool_choice"] = "required"
                 r = self._client(provider).chat.completions.create(
                     model=model,
                     messages=([{"role": "system", "content": system}] if system else [])
                     + [{"role": "user", "content": text}],
-                    tools=tools, max_tokens=max_tokens,
+                    tools=tools, max_tokens=max_tokens, **kw,
                 )
                 msg = r.choices[0].message
                 self.ledger.record(provider, model, task=task.value, ok=True, status=200,

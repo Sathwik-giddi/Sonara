@@ -64,7 +64,9 @@ def open_app(name: str) -> str:
 
 @registry.tool(
     name="media_control", pack=PACK,
-    description="Control whatever is currently playing audio or video: play, pause, next or previous track.",
+    description=("Control whatever is currently playing audio or video. Use for 'pause', "
+                 "'play it again', 'resume', 'skip this track', 'next', 'go back to the "
+                 "previous song', 'shut the music off'."),
     parameters={
         "type": "object",
         "properties": {"action": {"type": "string",
@@ -103,7 +105,8 @@ def set_volume(direction: str, steps: int = 5) -> str:
 
 @registry.tool(
     name="find_file", pack=PACK,
-    description="Find files by name under the user's home folder. Returns paths only, never contents.",
+    description=("Find files by name under the user's home folder. Use for 'find my X file', "
+                 "'where is X', 'look for files called X'. Returns paths only, never contents."),
     parameters={
         "type": "object",
         "properties": {
