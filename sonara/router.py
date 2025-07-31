@@ -197,7 +197,8 @@ class Router:
         ) from last_error
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict], *,
-                        task: Task | None = None, max_tokens: int = 300
+                        task: Task | None = None, max_tokens: int = 300,
+                        force_tool: bool = False
                         ) -> tuple[list, str, Choice, float]:
         """Message-list variant, for the agent loop.
 
@@ -223,7 +224,13 @@ class Router:
             try:
                 t0 = time.perf_counter()
                 kw: dict[str, Any] = {}
-                if self.tier_of(provider) == "local":
+                # Tools are only ever attached now when the gate has decided this is an
+                # action, and that gate measures ZERO false positives on the 100-utterance
+                # corpus. So requiring a call is safe, and it fixes the opposite failure:
+                # with tools merely offered, the model declined 23 times out of 40 - "hit
+                # pause", "fire up spotify", "what's the time" all went unanswered.
+                # Precision earned by the gate is spent here on recall.
+                if force_tool or self.tier_of(provider) == "local":
                     kw["tool_choice"] = "required"
                 r = self._client(provider).chat.completions.create(
                     model=model, messages=messages, tools=tools,

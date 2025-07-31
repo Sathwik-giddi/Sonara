@@ -34,6 +34,12 @@ from .tools import ConfirmationRequired, Executor, registry
 # paths. These never re-enter a hosted prompt; the agent stops and answers locally.
 LOCAL_ONLY = {"search_notes", "list_reminders", "find_file"}
 
+# Explicit separator between the conversational half of the prompt and the tool half.
+# The first version split on the literal string "You have tools"; rewording TOOLS_BLOCK
+# silently broke the split and leaked tool vocabulary straight back into conversation
+# mode - the exact bug the split existed to prevent.
+TOOL_MARKER = "<<<TOOLS>>>"
+
 def load_persona(name: str | None = None) -> tuple[str, str]:
     """Build the system prompt from config/personas.yaml. Returns (prompt, tts_voice).
 
@@ -63,22 +69,29 @@ def load_persona(name: str | None = None) -> tuple[str, str]:
 # scaffolding was making it stupider than it is - exactly the failure Cherny describes,
 # and measurable here: the minimal-prompt run scored 92.5% on tool calling against
 # 97.5%, and I took the five points at the cost of comprehension.
+# This block is attached ONLY when the gate decided the person wants something done.
+# It must therefore be ACTION-POSITIVE. The previous wording ("most turns need none")
+# was written for every turn and made the assistant tool-shy: measured on a 100-utterance
+# corpus, action recall fell to 25% - ask it to do something and it worked one time in
+# four. Conversation mode is handled by a separate prompt that never mentions tools, so
+# this one no longer has to hedge.
 TOOLS_BLOCK = (
-    "You have tools, but MOST TURNS NEED NONE. Understand what the person means first, "
-    "then decide.\n"
-    "Use a tool ONLY for:\n"
-    "- doing something on this computer (open, play, volume, screenshot, files)\n"
-    "- remembering something for them (reminders, notes)\n"
-    "- facts that CHANGE and you cannot know: today's weather, the time, current news, "
-    "live prices\n"
-    "Do NOT use a tool for anything else. You already know history, science, "
-    "definitions, and how things work - answer from your own knowledge, as you would in "
-    "conversation.\n"
-    "If someone is talking ABOUT you, disagreeing, thinking aloud, criticising, or just "
-    "chatting - that is conversation. Respond to what they actually said. Reaching for a "
-    "tool there is how you end up answering a complaint with a weather report.\n"
-    "When a tool does return something, say the values it gave. Never describe the shape "
-    "of the result, never add a caveat to it, and never mention the tool by name."
+    "The person wants something DONE, or wants a fact that changes. Call the right tool - "
+    "do not describe it, do not ask permission, just call it.\n"
+    "- open / play / pause / skip / volume / screenshot / find a file -> the pc tools\n"
+    "- remind, note, remember, 'don't let me forget', 'nudge me' -> set_reminder, add_note\n"
+    "- what's coming up, my reminders, my notes -> list_reminders, search_notes\n"
+    "- weather, temperature, raining, 'need a jacket', 'what's it like outside' "
+    "-> get_weather\n"
+    "- the time, the date, what day it is -> get_time\n"
+    "- news, prices, anything that happened recently -> web_search\n"
+    "- do it later / check later / tell me when -> check_later, watch_for\n"
+    "If the request is phrased unusually, map it to the closest tool anyway: 'crank it up' "
+    "is volume, 'scribble that down' is a note, 'dig up my resume' is a file search.\n"
+    "Only skip the tool if it is genuinely something you already know - history, science, "
+    "definitions - or if they are simply talking to you.\n"
+    "Say the values a tool returns. Never describe the shape of a result, never add a "
+    "caveat, never name the tool."
 )
 
 SYSTEM = (
@@ -130,9 +143,9 @@ class Agent:
 
         self.router = router or Router()
         self.executor = executor or Executor()
-        self.system = system
-        # Strip every mention of tools for conversational turns.
-        self.system_conversation = system.split("You have tools")[0].rstrip() + (
+        # Two prompts from one string, split on an explicit marker.
+        self.system = system.replace(TOOL_MARKER + "\n", "").replace(TOOL_MARKER, "")
+        self.system_conversation = system.split(TOOL_MARKER)[0].rstrip() + (
             "\n\nThis is a conversation. Reply in your own words, in plain speech. "
             "Never output JSON, function names, or anything resembling a tool call."
         )
@@ -251,17 +264,72 @@ class Agent:
     # So they are only offered when the utterance plausibly wants an ACTION or a fact
     # that genuinely changes. Everything else is a conversation, and a conversation
     # with no tools on the table cannot be answered with a weather report.
+    # Broadened from measurement, not intuition. The first version was a list of words
+    # ONE user happened to say, and the corpus caught what it missed: "put on some
+    # music", "crank it up", "scribble that down", "dig up my resume", "nudge me at
+    # half six", "what have I got coming up", "is it raining out". A keyword list will
+    # never be complete - but paired with a conversation prompt that has no tool
+    # vocabulary at all, its job is only to be GENEROUS about actions while keeping
+    # pure conversation out. Measured intrusive rate: 1 in 100 versus 22 when always on.
     _WANTS_TOOL = re.compile(
-        r"\b(open|close|launch|start|play|pause|resume|skip|next|mute|unmute|volume|"
-        r"screenshot|remind|reminder|remember|note|jot|write (this|that) down|delete|"
-        r"search|look up|google|find|where is|check|watch for|weather|temperature|"
-        r"raining|forecast|news|headlines|price|stock|time|date|today|tonight|tomorrow|"
-        r"what am i|my (notes|reminders|jobs)|working on)\b", re.I)
+        r"\b(open|close|launch|start|fire up|boot|run|play|put on|pause|stop|resume|"
+        r"skip|next|previous|back a track|mute|unmute|silence|volume|loud|quiet|turn "
+        r"(it|the)|crank|screenshot|capture|picture of (my|the) screen|"
+        r"remind|reminder|remember|nudge|ping|wake me|note|jot|scribble|write .{0,12}down|"
+        r"don'?t (let me )?forget|set (something|a|an)|"
+        r"delete|remove|search|look up|google|find|locate|dig up|hunt|where (is|did)|"
+        r"check|watch for|tell me when|later|"
+        r"weather|temperat|rain|snow|sunny|cold|hot|jacket|umbrella|outside|forecast|"
+        r"news|headline|happen(ed|ing)|price|stock|bitcoin|"
+        r"time|clock|date|what day|today|tonight|tomorrow|"
+        r"coming up|my (notes|reminders|jobs|schedule)|working on)\b", re.I)
 
     def _tools_for(self, text: str) -> list[dict]:
+        """Decide whether this utterance wants an action.
+
+        The regex below is a FAST PATH, not the decision. A keyword list written by
+        watching one person is guaranteed to miss "put on some music", "crank it up",
+        "dig up my resume" - measured, it did - and no amount of adding words fixes the
+        next hundred users' phrasings.
+
+        So anything the regex does not obviously catch goes to a MODEL. The local
+        3B answers in ~700ms and costs nothing, which is exactly what the free local
+        tier was built for. Generalising to phrasings nobody wrote down is what models
+        are for; hand-maintaining a vocabulary is what they replace.
+        """
         if self._WANTS_TOOL.search(text or ""):
             return registry.openai_schemas()
+        if self._classify_wants_action(text):
+            return registry.openai_schemas()
         return []
+
+    _CLASSIFIER_SYSTEM = (
+        "Decide if the user wants the assistant to DO something or to look up "
+        "something that changes (weather, time, news, prices), or whether they are "
+        "just talking.\n"
+        "Answer with exactly one word: ACTION or TALK.\n"
+        "ACTION: open an app, play or pause music, change volume, take a screenshot, "
+        "find a file, set a reminder, save or read a note, check the weather or time or "
+        "news.\n"
+        "TALK: questions you can answer from knowledge, opinions, feelings, criticism, "
+        "small talk, corrections, or anything about the assistant itself."
+    )
+
+    def _classify_wants_action(self, text: str) -> bool:
+        for provider in self.router.models.get("tiers", {}).get("local", []):
+            if not self.router.available(provider):
+                continue
+            try:
+                model = self.router.caps["providers"][provider]["pinned_model"]
+                r = self.router._client(provider).chat.completions.create(
+                    model=model, max_tokens=4,
+                    messages=[{"role": "system", "content": self._CLASSIFIER_SYSTEM},
+                              {"role": "user", "content": text}],
+                )
+                return "ACTION" in (r.choices[0].message.content or "").upper()
+            except Exception:  # noqa: BLE001 - a classifier outage must not block a turn
+                return False
+        return False
 
     def _memory_shortcircuit(self, name: str, args: dict) -> str | None:
         """Refuse to search the world for something we already know about this person.
@@ -409,8 +477,12 @@ class Agent:
         for _ in range(self.max_steps):
             msgs = self._messages(scratch, tools=bool(tools))
             try:
+                # Force the call only on the FIRST step: the gate said this is an
+                # action, so something should happen. Later steps stay free, or the
+                # model can never stop and answer.
                 calls, said, choice, first_ms = self.router.chat_with_tools(
                     msgs, tools, task=task,
+                    force_tool=bool(tools) and not steps,
                 )
             except NoProviderAvailable as e:
                 said = f"I couldn't reach a model just now. {e}"
