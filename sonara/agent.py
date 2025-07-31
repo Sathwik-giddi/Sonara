@@ -53,17 +53,32 @@ def load_persona(name: str | None = None) -> tuple[str, str]:
             p.get("voice", "en_US-lessac-medium"))
 
 
-# The capability half of the prompt: identical across personas, because what it CAN do
-# is not a matter of character.
+# CONVERSATION FIRST. The previous version commanded "use tools rather than guessing"
+# and attached all 20 schemas to every single turn. The result was an assistant that
+# never tried to understand anything: "yes, I was asking about that" fetched the
+# weather; "you are hallucinating too much" filed a note; a remark about self-directed
+# learning became a web search for study tips.
+#
+# It is a 70B model. It can hold a conversation and it knows who Alan Turing was. The
+# scaffolding was making it stupider than it is - exactly the failure Cherny describes,
+# and measurable here: the minimal-prompt run scored 92.5% on tool calling against
+# 97.5%, and I took the five points at the cost of comprehension.
 TOOLS_BLOCK = (
-    "You have tools - use them rather than guessing:\n"
-    "- weather -> get_weather; news, prices, anything current -> web_search\n"
-    "- facts about a person, place or thing -> look_up\n"
-    "- time or date -> get_time; apps, media, volume, files -> the pc tools\n"
-    "- reminders and notes -> set_reminder, add_note, search_notes\n"
-    "You may use several tools in a row when a request needs it: check something, then "
-    "act on what you found. If a tool fails, recover - answer from what you know or try "
-    "a real tool."
+    "You have tools, but MOST TURNS NEED NONE. Understand what the person means first, "
+    "then decide.\n"
+    "Use a tool ONLY for:\n"
+    "- doing something on this computer (open, play, volume, screenshot, files)\n"
+    "- remembering something for them (reminders, notes)\n"
+    "- facts that CHANGE and you cannot know: today's weather, the time, current news, "
+    "live prices\n"
+    "Do NOT use a tool for anything else. You already know history, science, "
+    "definitions, and how things work - answer from your own knowledge, as you would in "
+    "conversation.\n"
+    "If someone is talking ABOUT you, disagreeing, thinking aloud, criticising, or just "
+    "chatting - that is conversation. Respond to what they actually said. Reaching for a "
+    "tool there is how you end up answering a complaint with a weather report.\n"
+    "When a tool does return something, say the values it gave. Never describe the shape "
+    "of the result, never add a caveat to it, and never mention the tool by name."
 )
 
 SYSTEM = (
@@ -116,6 +131,11 @@ class Agent:
         self.router = router or Router()
         self.executor = executor or Executor()
         self.system = system
+        # Strip every mention of tools for conversational turns.
+        self.system_conversation = system.split("You have tools")[0].rstrip() + (
+            "\n\nThis is a conversation. Reply in your own words, in plain speech. "
+            "Never output JSON, function names, or anything resembling a tool call."
+        )
         self.max_steps = max_steps
         self.max_turns = max_turns
         self.max_history_tokens = max_history_tokens
@@ -131,8 +151,13 @@ class Agent:
 
     # ---------- helpers ----------
 
-    def _messages(self, extra: list[dict] | None = None) -> list[dict]:
-        system = self.system
+    def _messages(self, extra: list[dict] | None = None, *, tools: bool = True) -> list[dict]:
+        # TWO PROMPTS, not one. Handing the model a description of its tools teaches it
+        # to answer IN TOOL SYNTAX - with zero schemas attached it still replied
+        # {"name": "understand", "parameters": {...}}, inventing functions that do not
+        # exist. The tool vocabulary has to leave the prompt entirely for a conversation,
+        # not just leave the request.
+        system = self.system if tools else self.system_conversation
         # Only the lines relevant to THIS utterance are injected - never the whole
         # store. Cheaper, and a model ignores one true fact buried in fifty irrelevant
         # ones. Memory text is Class L, so this is the only place it may appear.
@@ -222,6 +247,22 @@ class Agent:
             return f"{name}." if name else "You haven't told me your name yet."
         return None
 
+    # Attaching tools is itself a nudge: a model handed 20 schemas tends to use one.
+    # So they are only offered when the utterance plausibly wants an ACTION or a fact
+    # that genuinely changes. Everything else is a conversation, and a conversation
+    # with no tools on the table cannot be answered with a weather report.
+    _WANTS_TOOL = re.compile(
+        r"\b(open|close|launch|start|play|pause|resume|skip|next|mute|unmute|volume|"
+        r"screenshot|remind|reminder|remember|note|jot|write (this|that) down|delete|"
+        r"search|look up|google|find|where is|check|watch for|weather|temperature|"
+        r"raining|forecast|news|headlines|price|stock|time|date|today|tonight|tomorrow|"
+        r"what am i|my (notes|reminders|jobs)|working on)\b", re.I)
+
+    def _tools_for(self, text: str) -> list[dict]:
+        if self._WANTS_TOOL.search(text or ""):
+            return registry.openai_schemas()
+        return []
+
     def _memory_shortcircuit(self, name: str, args: dict) -> str | None:
         """Refuse to search the world for something we already know about this person.
 
@@ -251,6 +292,38 @@ class Agent:
                 return (f"That subject is the person you are talking to, not an "
                         f"encyclopaedia topic. What you know: {known}")
         return None
+
+    _JSONISH = re.compile(r'^\s*[\{\[].*"(?:name|function|parameters|arguments)"', re.S)
+
+    def _never_speak_json(self, said: str, user_text: str) -> str:
+        """Last line of defence: a person must never hear punctuation read aloud.
+
+        Prompting got this from "always" down to a single case - a contentless fragment
+        like "yes, I was asking about that" with no history to attach it to, where the
+        model has nothing to say and falls back on structure. No amount of further
+        prompt-wrestling makes that guarantee; a check does.
+
+        One retry with an explicit instruction, then a plain human fallback.
+        """
+        said = (said or "").strip()
+        if said and not self._JSONISH.match(said):
+            return said
+
+        try:
+            _c, retry, _ch, _ms = self.router.chat_with_tools(
+                [{"role": "system", "content": self.system_conversation},
+                 {"role": "user", "content": user_text},
+                 {"role": "user", "content": "Reply in one short spoken sentence. Plain "
+                                             "words only - no JSON, no braces, no function "
+                                             "names. If they were vague, ask what they mean."}],
+                [], task=Task.CHAT,
+            )
+            retry = (retry or "").strip()
+            if retry and not self._JSONISH.match(retry):
+                return retry
+        except NoProviderAvailable:
+            pass
+        return "Sorry, say that again?"
 
     def _wrap_up(self, scratch: list[dict]) -> str:
         """Force a spoken answer with NO tools attached.
@@ -331,10 +404,10 @@ class Agent:
         self._steps_this_turn = steps
         choice = None
         first_ms = 0.0
-        tools = registry.openai_schemas()
+        tools = self._tools_for(text)
 
         for _ in range(self.max_steps):
-            msgs = self._messages(scratch)
+            msgs = self._messages(scratch, tools=bool(tools))
             try:
                 calls, said, choice, first_ms = self.router.chat_with_tools(
                     msgs, tools, task=task,
@@ -457,7 +530,7 @@ class Agent:
             except NoProviderAvailable:
                 said = "I can't do that one."
 
-        said = (said or "").strip() or "I'm not sure how to answer that."
+        said = self._never_speak_json(said, text)
 
         # Volunteer things without being asked. A due reminder that waits for you to ask
         # "any reminders?" is not a reminder.
