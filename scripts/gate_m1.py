@@ -129,19 +129,64 @@ def run_echo_test(n: int) -> None:
     sr = voice.config.sample_rate
     line = "This is Sonara speaking a test sentence for the echo check."
 
-    console.print(f"[bold]Echo test:[/bold] {n} playbacks. Speakers ON, do not speak.\n")
+    # PRECONDITION. This test passed twice for the wrong reason: once scoring
+    # uninitialised memory, once at a volume too low to hear. An echo test run on a
+    # silent speaker reports "no echo" and is worse than useless, because it retires
+    # a real risk on fake evidence. So prove the speaker->mic path is live FIRST.
+    # Probe with SPEECH, not a tone. A sustained pure tone is precisely what an
+    # adaptive noise suppressor removes, and this mic is an Intel Smart Sound array
+    # with DSP: the tone control read 2.6x once, then 0.9x moments later as the
+    # suppressor adapted. Speech is both the signal that actually matters and the
+    # one the DSP is tuned to preserve.
+    console.print("[dim]control: verifying the speaker-to-mic path is live...[/dim]")
+    probe_pcm = b"".join(c.audio_int16_bytes for c in voice.synthesize(line))
+    probe = np.frombuffer(probe_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    pidx = np.linspace(0, len(probe) - 1, int(len(probe) * st.SAMPLE_RATE / sr))
+    probe = np.interp(pidx, np.arange(len(probe)), probe).astype(np.float32).reshape(-1, 1)
+
+    quiet = np.asarray(sd.rec(int(1.0 * st.SAMPLE_RATE), samplerate=st.SAMPLE_RATE,
+                              channels=1, dtype="float32"))
+    sd.wait()
+    heard = np.asarray(sd.playrec(probe, samplerate=st.SAMPLE_RATE, channels=1,
+                                  dtype="float32"))
+    sd.wait()
+    q, h = float(np.abs(quiet[:, 0]).max()), float(np.abs(heard[:, 0]).max())
+    console.print(f"[dim]  silence {q:.4f} -> tone {h:.4f} ({h / max(q, 1e-6):.1f}x)[/dim]")
+    if h < q * 2:
+        console.print("[red]ABORT: the microphone cannot hear the speakers.[/red]")
+        console.print("[red]Turn the volume up and re-run. A 'clean' result at this "
+                      "volume would be meaningless.[/red]")
+        return
+
+    console.print(f"\n[bold]Echo test:[/bold] {n} playbacks. Speakers ON, do not speak.\n")
     for i in range(n):
         pcm = b"".join(c.audio_int16_bytes for c in voice.synthesize(line))
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        dur = len(audio) / sr
 
-        rec = sd.rec(int((dur + 0.3) * st.SAMPLE_RATE), samplerate=st.SAMPLE_RATE,
-                     channels=1, dtype="float32")
-        sd.play(audio, sr)
+        # playrec(), NOT rec()+play(). sounddevice's play/rec share one module-level
+        # stream, so calling play() after rec() silently CANCELS the recording - the
+        # first version of this test scored uninitialised memory and cheerfully
+        # reported "clean" on every trial. Resample the speech to the mic rate so a
+        # single duplex stream can carry both directions.
+        idx = np.linspace(0, len(audio) - 1, int(len(audio) * st.SAMPLE_RATE / sr))
+        speech = np.interp(idx, np.arange(len(audio)), audio).astype(np.float32)
+        tail = np.zeros(int(0.3 * st.SAMPLE_RATE), dtype=np.float32)
+        out = np.concatenate([speech, tail]).reshape(-1, 1)
+
+        mic = sd.playrec(out, samplerate=st.SAMPLE_RATE, channels=1, dtype="float32")
         sd.wait()
-        mic = rec[:, 0]
+        mic = np.asarray(mic, dtype=np.float32)[:, 0]
+
+        # Refuse to score a buffer that cannot be real. Silently passing on garbage
+        # is how a gate lies to you.
+        if not np.all(np.isfinite(mic)):
+            console.print(f"  [red]{i+1:>2}/{n}  INVALID capture (nan/inf) — not scored[/red]")
+            continue
 
         peak = float(np.abs(mic).max())
+        if peak > 1.5:
+            console.print(f"  [red]{i+1:>2}/{n}  INVALID capture (peak {peak:.1f}) — not scored[/red]")
+            continue
         text = st.transcribe(mic) or ""
         # Two independent signals: did the mic pick up speech-level energy, and did
         # STT actually decode Sonara's words back out of it?
