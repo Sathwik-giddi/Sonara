@@ -40,6 +40,15 @@ console = Console()
 SYSTEM = ("You are Sonara, a voice assistant on Windows. Use a tool whenever one fits "
           "the request. Never invent facts you would need a tool to know.")
 
+# --minimal tests exactly that, on this project, with numbers instead of vibes. Two
+# pieces of scaffolding are under suspicion: this system prompt, and the hand-tuned
+# phrasings added to tool descriptions ("jot down", "write this down") that took
+# GATE-M3 from 90% to 97.5%. If the model no longer needs them, they are pure token
+# cost - and token cost is the whole business (P5).
+MINIMAL_SYSTEM = "You are a voice assistant."
+
+STRIP_PHRASINGS = True  # under --minimal, also strip the hand-tuned tool descriptions
+
 # ---------------------------------------------------------------------------
 # The utterance script. Phrased the way they are actually SPOKEN, including the
 # sloppy ones - "uh" and trailing questions are what the mic really delivers.
@@ -160,15 +169,33 @@ def run_safety() -> tuple[int, int, list[str]]:
     return blocked, leaked, failures
 
 
-def run_tool_calling(tier_label: str) -> tuple[int, int, list[str]]:
+def _strip_scaffolding(schemas: list[dict]) -> list[dict]:
+    """Cut each tool description back to its first sentence.
+
+    That removes every "Use for 'jot down', 'write this down'..." hint I added by hand
+    after watching the eval fail, leaving only what the tool genuinely is.
+    """
+    out = []
+    for s in schemas:
+        s = {**s, "function": {**s["function"]}}
+        d = s["function"]["description"]
+        s["function"]["description"] = d.split(". ")[0].split(" Use for ")[0].strip().rstrip(".") + "."
+        out.append(s)
+    return out
+
+
+def run_tool_calling(tier_label: str, *, minimal: bool = False) -> tuple[int, int, list[str]]:
     router = Router()
     schemas = registry.openai_schemas()
+    system = MINIMAL_SYSTEM if minimal else SYSTEM
+    if minimal and STRIP_PHRASINGS:
+        schemas = _strip_scaffolding(schemas)
     correct = wrong = 0
     misses: list[str] = []
 
     for utterance, expected in SCRIPT:
         try:
-            calls, _text, choice = router.ask_with_tools(utterance, schemas, system=SYSTEM)
+            calls, _text, choice = router.ask_with_tools(utterance, schemas, system=system)
         except Exception as e:  # noqa: BLE001
             wrong += 1
             misses.append(f"{utterance!r} -> ERROR {type(e).__name__}")
@@ -195,6 +222,8 @@ def run_tool_calling(tier_label: str) -> tuple[int, int, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--safety-only", action="store_true", help="offline, no API calls")
+    ap.add_argument("--minimal", action="store_true",
+                    help="Cherny test: minimal prompt + stripped tool hints")
     args = ap.parse_args()
 
     console.print(f"[bold]GATE-M3[/bold]  {len(registry.all())} tools across "
@@ -218,12 +247,13 @@ def main() -> int:
     if args.safety_only:
         return 0 if safety_pass else 1
 
-    correct, wrong, misses = run_tool_calling("hosted fast")
+    correct, wrong, misses = run_tool_calling("hosted fast", minimal=args.minimal)
     total = correct + wrong
     pct = 100.0 * correct / total if total else 0.0
     tool_pass = pct >= 95.0
 
-    t2 = Table(title="Tool-calling gate (hosted fast tier)")
+    t2 = Table(title="Tool-calling gate (hosted fast tier)"
+           + (" - MINIMAL scaffolding" if args.minimal else ""))
     for c in ("metric", "value"):
         t2.add_column(c)
     t2.add_row("utterances", str(total))

@@ -189,28 +189,127 @@ def transcribe(audio: np.ndarray) -> str | None:
 # Until the M3 skill layer lands, "I can't know that yet" is the honest answer
 # and the one that keeps trust.
 SYSTEM_PROMPT = (
-    "You are Sonara, a voice assistant. Reply in natural spoken language, brief "
-    "but complete: if the user asks two things, answer both. You have no live "
-    "data yet - no weather, news, web or calendar access - so when asked for "
-    "real-time facts, say you cannot look that up yet instead of inventing an answer."
+    "You are Sonara, a voice assistant on Windows. Reply in natural spoken language, "
+    "brief but complete: if the user asks two things, answer both.\n"
+    "You HAVE tools. Use them instead of guessing or apologising:\n"
+    "- weather -> get_weather; news, prices, anything current -> web_search\n"
+    "- facts about a person, place or thing -> look_up\n"
+    "- time or date -> get_time; apps, media, volume, files, screenshots -> the pc tools\n"
+    "- reminders and notes -> set_reminder, add_note, search_notes\n"
+    "Never say you cannot look something up when a tool can. Never invent a fact a tool "
+    "could have given you. Speak plainly, no markdown."
 )
 
 
+# Tools whose OUTPUT is Class L data (design doc, component 6): note bodies, memory,
+# file contents. The tool result is composed into speech LOCALLY and never sent to a
+# hosted model, so the diary stays on the machine even when a hosted model routed
+# the request.
+LOCAL_ONLY_RESULTS = {"search_notes", "list_reminders", "find_file"}
+
+
+def _speak_result(name: str, args: dict, result) -> str:
+    """Template a tool result into speech without a model. Used for Class L data."""
+    if name == "search_notes":
+        rows = result or []
+        if not rows:
+            return "I couldn't find any notes about that."
+        head = "; ".join(r["line"] for r in rows[:3])
+        return f"I found {len(rows)} note{'s' if len(rows) != 1 else ''}: {head}"
+    if name == "list_reminders":
+        rows = result or []
+        if not rows:
+            return "You have no reminders set."
+        return "You have " + ", and ".join(f"{r['text']} at {r['due']}" for r in rows[:3])
+    if name == "find_file":
+        rows = result or []
+        if not rows:
+            return "I couldn't find a file matching that."
+        from pathlib import Path as _P
+        return f"I found {len(rows)}. The first is {_P(rows[0]).name}"
+    return str(result)
+
+
 def ask_llm(text: str) -> str | None:
-    """Route the utterance to whichever brain suits it, then stream the reply."""
+    """Hear, decide, ACT, then speak the result.
+
+    Until now this only ever produced conversation: the 16 tools existed and the voice
+    loop never attached them, so Sonara could not check the time it already knew how to
+    read. This is the loop that gives it hands.
+    """
     router = get_router()
     if router is None:
         return None
 
+    import json as _json
+
     from sonara import NoProviderAvailable, classify
+    from sonara.tools import ConfirmationRequired, Executor, registry
+
+    global _executor
+    if _executor is None:
+        _executor = Executor()
+
+    # A pending confirmation owns the next utterance entirely - "confirm" must not be
+    # routed to a model and answered conversationally.
+    if _executor.awaiting_confirmation:
+        out = _executor.resolve_confirmation(text)
+        return str(out.result) if out.ok else (out.error or "Cancelled.")
 
     task = classify(text)
     try:
         with stage("llm_full_reply"):
-            answer = router.ask(text, system=SYSTEM_PROMPT, task=task, max_tokens=200)
+            calls, said, choice = router.ask_with_tools(
+                text, registry.openai_schemas(), system=SYSTEM_PROMPT, task=task,
+            )
+            timings["llm_first_token"] = timings.get("llm_full_reply")
+
+            if calls:
+                call = calls[0]
+                name = call.function.name
+                try:
+                    args = _json.loads(call.function.arguments or "{}")
+                except _json.JSONDecodeError:
+                    args = {}
+                # Models send "null" (not "{}") for no-argument tools, and json.loads
+                # turns that into None, which then explodes inside the handler.
+                if not isinstance(args, dict):
+                    args = {}
+                console.print(f"[dim]tool: {name}({args})[/dim]")
+                try:
+                    out = _executor.execute(name, args)
+                except ConfirmationRequired as c:
+                    last_route["tier"] = router.tier_of(choice.provider)
+                    last_route["target_s"] = float(
+                        router.models.get("latency_targets_s", {}).get(last_route["tier"], 2.0))
+                    console.print(f"[yellow]awaiting confirmation[/yellow]")
+                    return c.prompt
+                if not out.ok:
+                    said = f"I couldn't do that. {out.error}"
+                elif name in LOCAL_ONLY_RESULTS:
+                    said = _speak_result(name, args, out.result)   # never leaves the machine
+                else:
+                    # Compose a spoken answer from the tool result. Fast tier: turning a
+                    # result into one sentence needs speed, not a 550B model.
+                    from sonara import Task
+                    said = router.ask(
+                        f"The user asked: {text}\nTool {name} returned: {out.result}\n"
+                        f"Answer them in one or two natural spoken sentences using that result.",
+                        system=SYSTEM_PROMPT, task=Task.CHAT, max_tokens=150,
+                    ).text
+            answer_text = said
+
     except NoProviderAvailable as e:
         console.print(f"[red]No brain available: {e}[/red]")
         return None
+
+    class _A:  # keep the reporting below unchanged
+        text = answer_text
+        first_token_ms = timings.get("llm_first_token") or 0.0
+        attempts: list = []
+
+    answer = _A()
+    answer.choice = choice
 
     timings["llm_first_token"] = answer.first_token_ms
     last_route["tier"] = router.tier_of(answer.choice.provider)
@@ -268,6 +367,7 @@ def speak(text: str) -> None:
 
 
 _router = None
+_executor = None
 
 
 def get_router():
