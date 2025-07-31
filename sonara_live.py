@@ -179,6 +179,15 @@ def main() -> int:
     prompt, voice = load_persona(args.persona)
     agent = Agent(system=prompt)
 
+    # Background work: the difference between a command line and an assistant. Runs on
+    # its own clock, queues what should be said, and the voice loop plays it between
+    # turns so it can never talk over the person.
+    from sonara.background import Scheduler
+    from sonara.tools import autonomy
+    scheduler = Scheduler(agent.executor)
+    autonomy.attach(scheduler)
+    scheduler.start()
+
     ear = Ear(args.aggressiveness)
     mouth = Mouth(ear, voice)
     st.transcribe(np.zeros(SR, dtype=np.float32))     # load STT before the first word
@@ -197,6 +206,11 @@ def main() -> int:
                 ear.mute(True)
                 console.input("[dim]press Enter to speak...[/dim]")
                 ear.mute(False)
+
+            # Speak anything the background worker finished while you were quiet.
+            for ann in scheduler.drain():
+                console.print(f"[bold green]sonara:[/bold green] {ann.text}  [dim](background)[/dim]")
+                mouth.say(ann.text)
 
             audio = ear.listen()
             if audio is None or len(audio) < SR // 3:
@@ -221,6 +235,7 @@ def main() -> int:
         agent.close()
         mouth.say("Goodbye.")
     finally:
+        scheduler.stop()
         ear.stop()
     return 0
 
