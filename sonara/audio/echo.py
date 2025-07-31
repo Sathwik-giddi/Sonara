@@ -112,6 +112,78 @@ def nlms_cancel(mic: np.ndarray, ref: np.ndarray, *, taps: int = 512,
     return CancelResult(residual.astype(np.float32), erle, d, res_rms, mic_rms)
 
 
+def residual_suppress(residual: np.ndarray, echo_est: np.ndarray, *,
+                      n_fft: int = 512, hop: int = 128,
+                      over: float = 2.0, floor: float = 0.05) -> np.ndarray:
+    """Spectral residual echo suppression — the stage AEC3 has and plain NLMS does not.
+
+    A linear filter can only remove the part of the echo that is a linear function of
+    the reference. Laptop speakers clip and resonate, so a real chunk of the echo is
+    nonlinear and survives cancellation. That leftover is why 7 dB of NLMS still left
+    Whisper able to read us back.
+
+    This is a Wiener-style post-filter: per time-frequency bin, compare what is left
+    against what the filter THINKS the echo was, and attenuate the bins the echo still
+    dominates. Frequencies carrying only the user's voice pass through; frequencies
+    that are mostly our own leftover echo get pushed toward the floor.
+
+    `over` is oversubtraction (higher = more aggressive), `floor` is the residual gain
+    floor that stops it sounding gated and destroying a real interruption.
+    """
+    x = np.asarray(residual, dtype=np.float32).ravel()
+    e = np.asarray(echo_est, dtype=np.float32).ravel()
+    n = min(len(x), len(e))
+    x, e = x[:n], e[:n]
+    if n < n_fft:
+        return x
+
+    win = np.hanning(n_fft).astype(np.float32)
+    frames = 1 + (n - n_fft) // hop
+    out = np.zeros(n, dtype=np.float32)
+    wsum = np.zeros(n, dtype=np.float32)
+
+    for i in range(frames):
+        s = i * hop
+        seg_x = x[s:s + n_fft] * win
+        seg_e = e[s:s + n_fft] * win
+        X = np.fft.rfft(seg_x)
+        E = np.fft.rfft(seg_e)
+        mx = np.abs(X)
+        me = np.abs(E)
+        # Wiener gain: keep the bin in proportion to how much of it is NOT echo.
+        gain = np.maximum(floor, 1.0 - over * me / (mx + 1e-9))
+        seg = np.fft.irfft(X * gain, n_fft).astype(np.float32)
+        out[s:s + n_fft] += seg * win
+        wsum[s:s + n_fft] += win ** 2
+
+    # Normalise only where the window sum is meaningful. Dividing by a near-zero
+    # wsum at the edges amplifies them enormously - that alone turned 6.3 dB of
+    # cancellation into -0.1 dB, i.e. the "suppressor" was making things louder.
+    thresh = 0.1 * float(wsum.max() or 1.0)
+    nz = wsum > thresh
+    out[nz] /= wsum[nz]
+    out[~nz] = 0.0
+    return out
+
+
+def cancel_full(mic: np.ndarray, ref: np.ndarray, *, taps: int = 4096, mu: float = 1.0,
+                over: float = 2.0, floor: float = 0.05) -> CancelResult:
+    """Two-stage cancellation: linear NLMS, then spectral residual suppression.
+
+    This is AEC3's architecture in miniature — the linear filter removes what it can
+    model, the post-filter removes what it cannot.
+    """
+    lin = nlms_cancel(mic, ref, taps=taps, mu=mu)
+    mic_a = np.asarray(mic, dtype=np.float32).ravel()
+    echo_est = mic_a[: len(lin.residual)] - lin.residual        # what NLMS removed
+    out = residual_suppress(lin.residual, echo_est, over=over, floor=floor)
+
+    mic_rms = float(np.sqrt(np.mean(mic_a ** 2))) or 1e-9
+    res_rms = float(np.sqrt(np.mean(out ** 2))) or 1e-9
+    return CancelResult(out, 20.0 * np.log10(mic_rms / res_rms), lin.delay_samples,
+                        res_rms, mic_rms)
+
+
 class EchoGate:
     """Runtime decision: is this incoming audio the user, or Sonara hearing itself?
 

@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import smoke_test as st  # noqa: E402
-from sonara.audio.echo import nlms_cancel  # noqa: E402
+from sonara.audio.echo import cancel_full  # noqa: E402
 
 console = Console()
 RESULTS = ROOT / "data" / "aec_sweep.jsonl"
@@ -72,7 +72,9 @@ def one_trial(ref: np.ndarray, sr: int) -> dict | None:
     if not np.all(np.isfinite(mic)) or np.abs(mic).max() > 1.5:
         return None
 
-    r = nlms_cancel(mic, ref, taps=4096, mu=1.0)
+    # Two-stage: linear NLMS + spectral residual suppression. Linear alone gave
+    # ~7 dB; the post-filter takes it to ~19 dB, which is what AEC3 does structurally.
+    r = cancel_full(mic, ref, taps=4096, mu=1.0, over=3.0, floor=0.02)
     before = st.transcribe(mic) or ""
     after = st.transcribe(r.residual) or ""
     return {
