@@ -46,7 +46,8 @@ def load_persona(name: str | None = None) -> tuple[str, str]:
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config/personas.yaml").read_text())
     key = name or os.environ.get("SONARA_PERSONA") or cfg.get("default", "cloud")
     p = cfg["personas"].get(key) or cfg["personas"][cfg["default"]]
-    return (f"{p['prompt'].strip()}\n\n{cfg['universal'].strip()}\n\n{TOOLS_BLOCK}",
+    return (f"{p['prompt'].strip()}\n\n{cfg.get('behaviour', '').strip()}\n\n"
+            f"{cfg['universal'].strip()}\n\n{TOOLS_BLOCK}",
             p.get("voice", "en_US-lessac-medium"))
 
 
@@ -106,7 +107,10 @@ class Agent:
 
     def __init__(self, *, router: Router | None = None, executor: Executor | None = None,
                  system: str = SYSTEM, max_steps: int = 4,
-                 max_turns: int = 6, max_history_tokens: int = 1200) -> None:
+                 max_turns: int = 6, max_history_tokens: int = 1200,
+                 memory: "Memory | None" = None, use_memory: bool = True) -> None:
+        from .memory import Memory
+
         self.router = router or Router()
         self.executor = executor or Executor()
         self.system = system
@@ -114,12 +118,23 @@ class Agent:
         self.max_turns = max_turns
         self.max_history_tokens = max_history_tokens
         self.history: list[dict] = []
+        self._memory_context = ""
+        self.learned_this_turn: list[str] = []
+        # Persistent across sessions. Without this every conversation starts as a
+        # stranger, which is the largest single gap between an assistant and someone.
+        self.memory = memory or (Memory() if use_memory else None)
+        self.recalled: list[str] = []
 
     # ---------- helpers ----------
 
     def _messages(self, extra: list[dict] | None = None) -> list[dict]:
-        return ([{"role": "system", "content": self.system}] + self.history
-                + (extra or []))
+        system = self.system
+        # Only the lines relevant to THIS utterance are injected - never the whole
+        # store. Cheaper, and a model ignores one true fact buried in fifty irrelevant
+        # ones. Memory text is Class L, so this is the only place it may appear.
+        if self._memory_context:
+            system = f"{system}\n\n{self._memory_context}"
+        return ([{"role": "system", "content": system}] + self.history + (extra or []))
 
     @staticmethod
     def _args_of(call) -> dict:
@@ -162,6 +177,20 @@ class Agent:
             return TurnResult(said)
 
         task = classify(text)
+
+        # Recall BEFORE answering, remember AFTER. Both happen without the person ever
+        # asking - that automaticity is what makes it feel like being known rather than
+        # like operating a database.
+        self._memory_context = ""
+        self.recalled = []
+        if self.memory:
+            self._memory_context = self.memory.context_for(text)
+            self.recalled = [line[2:] for line in self._memory_context.splitlines()
+                             if line.startswith("- ")]
+            learned = self.memory.observe(text)
+            if learned:
+                self.learned_this_turn = learned
+
         self.history.append({"role": "user", "content": text})
         scratch: list[dict] = []
         steps: list[Step] = []
