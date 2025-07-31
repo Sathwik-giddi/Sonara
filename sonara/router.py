@@ -196,6 +196,57 @@ class Router:
             f"all candidates failed for task={task.value}: {'; '.join(attempts)}"
         ) from last_error
 
+    def chat_with_tools(self, messages: list[dict], tools: list[dict], *,
+                        task: Task | None = None, max_tokens: int = 300
+                        ) -> tuple[list, str, Choice, float]:
+        """Message-list variant, for the agent loop.
+
+        ask_with_tools() takes a single utterance and cannot carry conversation history
+        or intermediate tool results, so it can never chain. This is the same routing
+        and failover, with a full message list.
+        """
+        task = task or Task.COMMAND
+        attempts: list[str] = []
+        last_error: Exception | None = None
+        messages, comp = compress_messages(messages)
+        if comp.saved > 0:
+            self.tokens_saved += comp.saved
+
+        for cand in self.candidates(task):
+            provider, model = cand["provider"], cand["model"]
+            if self._forbidden(model) or not self.available(provider):
+                continue
+            if not self.ledger.has_headroom(provider, model, self._caps_for(provider)):
+                continue
+            choice = Choice(provider, model, task,
+                            self.caps["providers"][provider]["base_url"], f"task={task.value}")
+            try:
+                t0 = time.perf_counter()
+                kw: dict[str, Any] = {}
+                if self.tier_of(provider) == "local":
+                    kw["tool_choice"] = "required"
+                r = self._client(provider).chat.completions.create(
+                    model=model, messages=messages, tools=tools,
+                    max_tokens=max_tokens, **kw,
+                )
+                ms = (time.perf_counter() - t0) * 1000
+                msg = r.choices[0].message
+                self.ledger.record(provider, model, task=task.value, ok=True,
+                                   status=200, latency_ms=ms)
+                return (msg.tool_calls or [], (msg.content or "").strip(), choice, ms)
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                self.ledger.record(provider, model, task=task.value, ok=False, status=status)
+                if status in (429, 402):
+                    self.ledger.mark_exhausted(provider, model, retry_after_s=_retry_after(e),
+                                               reason=f"HTTP {status}")
+                attempts.append(f"{provider}/{model}: {type(e).__name__}")
+
+        raise NoProviderAvailable(
+            f"no provider served tools for task={task.value}: {'; '.join(attempts)}"
+        ) from last_error
+
     def ask_with_tools(self, text: str, tools: list[dict], *, system: str | None = None,
                        task: Task | None = None, max_tokens: int = 300) -> tuple[list, str, Choice]:
         """Route, attach tool definitions, and return (tool_calls, text, choice).
