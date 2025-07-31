@@ -20,6 +20,8 @@ is not an assistant you keep.
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,6 +122,7 @@ class Agent:
         self.history: list[dict] = []
         self._memory_context = ""
         self.learned_this_turn: list[str] = []
+        self.suggest_skill: str | None = None
         # Persistent across sessions. Without this every conversation starts as a
         # stranger, which is the largest single gap between an assistant and someone.
         self.memory = memory or (Memory() if use_memory else None)
@@ -222,6 +225,15 @@ class Agent:
 
             steps.append(Step(name, args, out.ok, out.result, out.error))
 
+            # Notice repetition. Three of the same action is the point at which a person
+            # would say "can you just do this automatically?" - so Sonara says it first.
+            if out.ok and self.memory and name not in LOCAL_ONLY:
+                n = self.memory.note_action(name, args)
+                if n == 3:
+                    self.suggest_skill = (
+                        f"You've asked me to do that three times now. "
+                        f"Want me to learn it as a shortcut?")
+
             if not out.ok:
                 # Hand the failure BACK to the model instead of giving up. Models invent
                 # tools that sound plausible - asked to compare two known values it
@@ -280,6 +292,16 @@ class Agent:
                 said = "I can't do that one."
 
         said = (said or "").strip() or "I'm not sure how to answer that."
+
+        # Volunteer things without being asked. A due reminder that waits for you to ask
+        # "any reminders?" is not a reminder.
+        extras = [f"By the way, {d}." for d in self._due_reminders()]
+        if self.suggest_skill:
+            extras.append(self.suggest_skill)
+            self.suggest_skill = None
+        if extras:
+            said = said + " " + " ".join(extras)
+
         self.history.append({"role": "assistant", "content": said})
         # Trim AFTER appending so the reply is kept and the oldest turns fall off.
         # This is what keeps cost per exchange flat instead of creeping upward.
@@ -287,6 +309,68 @@ class Agent:
                                     max_tokens=self.max_history_tokens)
         return TurnResult(said, steps, choice, first_ms,
                           tokens_in=sum(count_tokens(m["content"]) for m in self._messages()))
+
+    # ---------- proactivity ----------
+
+    def greeting(self) -> str | None:
+        """What to say when a session opens, before being spoken to.
+
+        This is the moment continuity becomes audible. An assistant that opens with
+        "How can I help you today?" has told you it does not know who you are. One that
+        opens with what you were doing last time has.
+
+        Costs nothing: no model call, just memory and the reminder table.
+        """
+        if not self.memory:
+            return None
+        bits: list[str] = []
+        name = self.memory.name()
+        last = self.memory.last_episode()
+
+        if last:
+            when, _, what = last.text.partition(": ")
+            today = datetime.now().strftime("%Y-%m-%d")
+            lead = "Earlier" if when == today else "Last time"
+            bits.append(f"{lead} you were {what.strip()}.")
+        elif name:
+            bits.append(f"Hello {name}.")
+
+        for due in self._due_reminders():
+            bits.append(f"Reminder: {due}.")
+
+        return " ".join(bits) or None
+
+    def _due_reminders(self) -> list[str]:
+        """Reminders that have come due. Checked every turn AND at session open.
+
+        Real proactivity does not need a background process to start being useful: the
+        next time the person speaks is a perfectly good moment to say "that reminder you
+        set has come due". The tray (M4) makes it timely; this makes it exist.
+        """
+        try:
+            out = self.executor.execute("due_reminders", {})
+            return list(out.result or []) if out.ok else []
+        except Exception:  # noqa: BLE001 - never let a reminder check break a turn
+            return []
+
+    def close(self, summary: str | None = None) -> None:
+        """Store what this session was about, so the next one can open knowing.
+
+        Summarised from the conversation without a model call: the first thing the
+        person actually asked for is a better session title than anything generated,
+        and it costs nothing.
+        """
+        if not self.memory:
+            return
+        if summary is None:
+            firsts = [m["content"] for m in self.history if m["role"] == "user"]
+            if not firsts:
+                return
+            # QUOTE it rather than paraphrase. Stripping the question word produced
+            # "asking about time is it" from "what time is it" - grammar that no
+            # rewriting rule survives for long. A quote is always well-formed.
+            summary = 'asking "' + firsts[0].strip().rstrip("?.")[:80] + '"'
+        self.memory.add_episode(summary)
 
     def reset(self) -> None:
         self.history.clear()

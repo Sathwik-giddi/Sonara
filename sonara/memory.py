@@ -143,6 +143,38 @@ class Memory:
     def add_episode(self, summary: str) -> None:
         self.remember(f"{datetime.now():%Y-%m-%d}: {summary}", kind="episode", source="session")
 
+    def last_episode(self) -> Memory_ | None:
+        row = self.db.execute(
+            "SELECT id, kind, text, created, hits FROM memories WHERE kind='episode' "
+            "ORDER BY created DESC LIMIT 1").fetchone()
+        return Memory_(*row) if row else None
+
+    def name(self) -> str | None:
+        row = self.db.execute(
+            "SELECT text FROM memories WHERE kind='fact' AND lower(text) LIKE 'their name is %' "
+            "ORDER BY created DESC LIMIT 1").fetchone()
+        return row[0].split("is", 1)[1].strip() if row else None
+
+    # ---------- pattern noticing (the skill-forge seed) ----------
+
+    def note_action(self, tool: str, args: dict) -> int:
+        """Count how often a specific action is repeated.
+
+        This is the seed of the skill forge: an assistant that notices "you've done this
+        three times" and offers to learn it turns repetition into capability. Counting is
+        local, free, and needs no model.
+        """
+        key = f"{tool}:{sorted(args.items())!r}"[:200]
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS action_counts ("
+            "key TEXT PRIMARY KEY, tool TEXT, n INTEGER NOT NULL DEFAULT 0, last REAL)")
+        self.db.execute(
+            "INSERT INTO action_counts (key, tool, n, last) VALUES (?,?,1,?) "
+            "ON CONFLICT(key) DO UPDATE SET n = n + 1, last = excluded.last",
+            (key, tool, time.time()))
+        self.db.commit()
+        return self.db.execute("SELECT n FROM action_counts WHERE key=?", (key,)).fetchone()[0]
+
     # ---------- reading ----------
 
     def recall(self, query: str, limit: int = 4) -> list[Memory_]:
@@ -197,11 +229,15 @@ class Memory:
 
         parts = []
         if core:
-            parts.append("ESTABLISHED FACTS about the person you are speaking to. These "
-                         "are true and you already know them - use them to answer "
-                         "directly. Never say you do not know something listed here, and "
-                         "never announce that you are recalling:\n"
-                         + "\n".join(f"- {m.text}" for m in core))
+            parts.append(
+                "ESTABLISHED FACTS about the person you are speaking to. These are true "
+                "and you ALREADY KNOW them.\n"
+                "ANSWER FROM THIS LIST DIRECTLY. Do NOT call a tool for anything listed "
+                "here - look_up and web_search are for the world, not for this person. "
+                "Asked which bank they use, say the bank; do not search Wikipedia for it.\n"
+                "Never say you do not know something listed here, and never announce that "
+                "you are recalling:\n"
+                + "\n".join(f"- {m.text}" for m in core))
         if hits:
             parts.append("Possibly relevant from earlier:\n"
                          + "\n".join(f"- {m.text}" for m in hits))
