@@ -27,6 +27,7 @@ from typing import Any, Iterable
 import yaml
 from dotenv import load_dotenv
 
+from .compress import compress_messages, count_tokens
 from .ledger import Ledger
 from .tasks import Task, classify
 
@@ -76,6 +77,7 @@ class Router:
         self.models = yaml.safe_load((models_path or ROOT / "config/models.yaml").read_text())
         self.ledger = ledger or Ledger()
         self._clients: dict[str, Any] = {}
+        self.tokens_saved = 0     # cumulative, for the "$0 spent" counter in the M6 HUD
 
     # ---------- provider plumbing ----------
 
@@ -251,6 +253,14 @@ class Router:
               max_tokens: int, stream: bool, attempts: list[str]) -> Answer:
         messages = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": text}]
+
+        # Compress before sending. A no-op on short utterances by design - the saving
+        # on 6 tokens is a rounding error and the risk of changing what the user meant
+        # is not. It earns its place on the summarize class, where pasted text arrives.
+        messages, comp = compress_messages(messages)
+        if comp.saved > 0:
+            self.tokens_saved += comp.saved
+            attempts.append(f"compressed {comp.tokens_before}->{comp.tokens_after} tok")
         client = self._client(choice.provider)
 
         t0 = time.perf_counter()
