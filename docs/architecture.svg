@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#101731"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#818cf8"/><stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="430" rx="16" fill="url(#bg)"/>
+  <text x="480" y="42" text-anchor="middle" fill="#e2e8f0" font-size="22" font-weight="700">Sonara — Voice Pipeline Architecture</text>
+  <text x="480" y="64" text-anchor="middle" fill="#64748b" font-size="13">one process · always on · $0 of cloud spend</text>
+
+  <!-- Row 1: input chain -->
+  <g>
+    <rect x="40" y="100" width="130" height="64" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="105" y="126" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">🎙️ Microphone</text>
+    <text x="105" y="146" text-anchor="middle" fill="#94a3b8" font-size="11">16 kHz capture</text>
+
+    <rect x="210" y="100" width="150" height="64" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="285" y="126" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">VAD Gate</text>
+    <text x="285" y="146" text-anchor="middle" fill="#94a3b8" font-size="11">30 ms frames · barge-in</text>
+
+    <rect x="400" y="100" width="170" height="64" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="485" y="126" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">STT</text>
+    <text x="485" y="146" text-anchor="middle" fill="#94a3b8" font-size="11">faster-whisper · CUDA opt.</text>
+
+    <rect x="610" y="100" width="150" height="64" rx="10" fill="#1e293b" stroke="#818cf8"/>
+    <text x="685" y="126" text-anchor="middle" fill="#a5b4fc" font-size="14" font-weight="700">Task Router</text>
+    <text x="685" y="146" text-anchor="middle" fill="#94a3b8" font-size="11">quota ledger · tier-aware</text>
+
+    <line x1="170" y1="132" x2="208" y2="132" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="360" y1="132" x2="398" y2="132" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="570" y1="132" x2="608" y2="132" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Free-tier providers under router -->
+  <g>
+    <rect x="800" y="88" width="120" height="88" rx="10" fill="#141c38" stroke="#334155"/>
+    <text x="860" y="110" text-anchor="middle" fill="#818cf8" font-size="12" font-weight="700">FREE TIERS</text>
+    <text x="860" y="128" text-anchor="middle" fill="#cbd5e1" font-size="11">Groq · Google AI</text>
+    <text x="860" y="144" text-anchor="middle" fill="#cbd5e1" font-size="11">NVIDIA NIM</text>
+    <text x="860" y="160" text-anchor="middle" fill="#cbd5e1" font-size="11">OpenRouter · Mistral</text>
+    <line x1="760" y1="132" x2="798" y2="132" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="4 3"/>
+  </g>
+
+  <!-- Row 2: brain -->
+  <g>
+    <rect x="400" y="215" width="360" height="70" rx="12" fill="url(#accent)" opacity="0.14"/>
+    <rect x="400" y="215" width="360" height="70" rx="12" fill="none" stroke="#818cf8"/>
+    <text x="580" y="243" text-anchor="middle" fill="#e0e7ff" font-size="15" font-weight="700">Agent Loop</text>
+    <text x="580" y="263" text-anchor="middle" fill="#a5b4fc" font-size="11.5">multi-step tool chaining · conversation memory · personas</text>
+
+    <line x1="685" y1="164" x2="620" y2="213" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- memory / tools side modules -->
+    <rect x="120" y="222" width="150" height="56" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="195" y="245" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Memory</text>
+    <text x="195" y="263" text-anchor="middle" fill="#94a3b8" font-size="11">FTS5 · survives restarts</text>
+
+    <rect x="120" y="296" width="150" height="56" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="195" y="319" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Tools</text>
+    <text x="195" y="337" text-anchor="middle" fill="#94a3b8" font-size="11">PC · web · notes · autonomy</text>
+
+    <line x1="272" y1="250" x2="398" y2="250" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="272" y1="324" x2="450" y2="287" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Row 3: output -->
+  <g>
+    <rect x="520" y="330" width="180" height="64" rx="10" fill="#1e293b" stroke="#c084fc"/>
+    <text x="610" y="356" text-anchor="middle" fill="#f5d0fe" font-size="14" font-weight="600">TTS</text>
+    <text x="610" y="376" text-anchor="middle" fill="#94a3b8" font-size="11">Piper · sentence-level stream</text>
+
+    <rect x="750" y="330" width="140" height="64" rx="10" fill="#1e293b" stroke="#334155"/>
+    <text x="820" y="356" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">🔊 Speaker</text>
+    <text x="820" y="376" text-anchor="middle" fill="#94a3b8" font-size="11">two-stage AEC</text>
+
+    <line x1="580" y1="287" x2="595" y2="328" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="700" y1="362" x2="748" y2="362" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- echo cancellation feedback -->
+    <path d="M 890 330 C 920 260 780 200 762 168" fill="none" stroke="#f43f5e" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+    <text x="925" y="255" fill="#fb7185" font-size="10.5" transform="rotate(90 925 255)">echo cancelled</text>
+  </g>
+
+  <!-- proactivity note -->
+  <g>
+    <rect x="40" y="330" width="230" height="64" rx="10" fill="#141c38" stroke="#334155" stroke-dasharray="5 4"/>
+    <text x="155" y="356" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Background Autonomy</text>
+    <text x="155" y="376" text-anchor="middle" fill="#94a3b8" font-size="11">due reminders · pattern noticing</text>
+  </g>
+</svg>
