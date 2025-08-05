@@ -40,7 +40,7 @@ console = Console()
 SYSTEM = ("You are Sonara, a voice assistant on Windows. Use a tool whenever one fits "
           "the request. Never invent facts you would need a tool to know.")
 
-# --minimal tests exactly that, on this project, with numbers instead of vibes. Two
+# --minimal tests scaffolding on this project, with numbers instead of vibes. Two
 # pieces of scaffolding are under suspicion: this system prompt, and the hand-tuned
 # phrasings added to tool descriptions ("jot down", "write this down") that took
 # GATE-M3 from 90% to 97.5%. If the model no longer needs them, they are pure token
